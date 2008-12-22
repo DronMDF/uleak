@@ -5,6 +5,8 @@
 #include <stdint.h>
 #include <unistd.h>
 
+#include <pthread.h>
+
 #include <algorithm>
 using namespace std;
 
@@ -21,11 +23,9 @@ static const bool check_free_repetition = true;
 
 // Контролировать пространство за пределами блока
 static const bool check_tail = true;
-static const bool check_tail_zone = true;
-// Переодически проводить проверки хвостов.
 static const bool check_tail_repetition = true;
-// Размер буферной зоны в заголовке блока.
-static const uint32_t tail_zone = check_tail_zone ? 32 : 0;
+// Размер буферной зоны
+static const uint32_t tail_zone = check_tail ? 32 : 0;
 
 // Фильтровать стандартные функции из CallPoint's
 static const bool function_filter = true;
@@ -53,7 +53,6 @@ static const uint32_t FFILL32 = 0xFBFBFBFB;
 static const uint8_t AFILL = 0xAB;
 
 struct block_control {
-	uint8_t tail[tail_zone];	// Контролирование хвостов.
 	uint32_t asize;	// aligned size
 	uint32_t cp;
 	uint32_t size;
@@ -295,14 +294,7 @@ static
 void sblock_tail_init (struct block_control *block, uint8_t *bptr)
 {
 	memset (bptr + sizeof(struct block_control) + block->size, AFILL, block->asize - block->size);
-
-	uint8_t *nptr = bptr + sizeof(struct block_control) + block->asize;
-	if (nptr < sheap + heap_size) {
-		struct block_control *nblock = reinterpret_cast<struct block_control *>(nptr);
-		memset (nblock->tail, AFILL, tail_zone);
-	}
 }
-
 
 static
 void sblock_tail_check (struct block_control *block, uint8_t *bptr)
@@ -310,24 +302,10 @@ void sblock_tail_check (struct block_control *block, uint8_t *bptr)
 	// Проконтролируем хвост блока...
 	int corrupted = 0;
 
-	uint8_t *nptr = bptr + sizeof(struct block_control) + block->asize;
-	assert ((uint32_t)nptr % 16 == 0);
-	if (nptr < sheap + heap_size) {
-		struct block_control *nblock = reinterpret_cast<struct block_control *>(nptr);
-		for (int i = tail_zone - 1; i >= 0; i--) {
-			if (nblock->tail[i] != AFILL) {
-				corrupted = i + block->asize - block->size;
-				break;
-			}
-		}
-	}
-
-	if (corrupted == 0) {
-		for (int i = block->asize - block->size - 1; i >= 0; i--) {
-			if (bptr[sizeof(struct block_control) + block->size + i] != AFILL) {
-				corrupted = i;
-				break;
-			}
+	for (int i = block->asize - block->size - 1; i >= 0; i--) {
+		if (bptr[sizeof(struct block_control) + block->size + i] != AFILL) {
+			corrupted = i;
+			break;
 		}
 	}
 
@@ -364,12 +342,6 @@ void sblock_free_init (struct block_control *block, uint8_t *bptr)
 {
 	// Замусорим блок специально.
 	memset (bptr + sizeof(struct block_control), FFILL, block->asize);
-
-	uint8_t *nptr = bptr + sizeof(struct block_control) + block->asize;
-	if (nptr < sheap + heap_size) {
-		struct block_control *nblock = reinterpret_cast<struct block_control *>(nptr);
-		memset (nblock->tail, FFILL, tail_zone);
-	}
 }
 
 static
@@ -383,17 +355,6 @@ void sblock_free_check (struct block_control *block, uint8_t *bptr)
 	for (uint32_t i = 0; i < block->asize; i++) {
 		if (bptr[sizeof(struct block_control) + i] != FFILL) {
 			modify = true;
-		}
-	}
-
-	uint8_t *nptr = bptr + sizeof(struct block_control) + block->asize;
-	assert ((uint32_t)nptr % 16 == 0);
-	if (nptr < sheap + heap_size) {
-		struct block_control *nblock = reinterpret_cast<struct block_control *>(nptr);
-		for (uint32_t i = 0; i < tail_zone; i++) {
-			if (nblock->tail[i] != FFILL) {
-				modify = true;
-			}
 		}
 	}
 
@@ -539,7 +500,7 @@ void *sonealloc (size_t size, uint32_t cp)
 {
 	speriodic();
 
-	const uint32_t asize = (size + 15) & ~15;
+	const uint32_t asize = (size + tail_zone + 15) & ~15;
 
 	for (uint8_t *bptr = sheap; bptr < sheap + heap_size; ) {
 		assert ((uint32_t)bptr % 16 == 0);
