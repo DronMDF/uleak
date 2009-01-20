@@ -10,53 +10,64 @@
 #include <algorithm>
 using namespace std;
 
+namespace {
+
 // Частота вызова переодических операций.
 // Меряется количествами вызовов функций alloc/free
-static const uint32_t operation_period = 3000;
+const uint32_t operation_period = 3000;
 
 // Ругаться на free(0)
-static const bool free_zero = false;
+const bool free_zero = false;
 
 // Заполнение освобождаемых блоков и контроль использования после освобождения (может производиться с большо-о-ой задержкой)
-static const bool check_free = true;
-static const bool check_free_repetition = true;
+const bool check_free = true;
+const bool check_free_repetition = true;
 
 // Контролировать пространство за пределами блока
-static const bool check_tail = true;
-static const bool check_tail_repetition = true;
+const bool check_tail = true;
+const bool check_tail_repetition = true;
 // Размер буферной зоны
-static const uint32_t tail_zone = check_tail ? 32 : 0;
+const uint32_t tail_zone = check_tail ? 32 : 0;
 
 // Фильтровать стандартные функции из CallPoint's
-static const bool function_filter = true;
+const bool function_filter = true;
 
 // 16 мегабайт - размер хипа. его должно хватать.
-static const uint32_t heap_size = 32 * 1024 * 1024;
+const uint32_t heap_size = 32 * 1024 * 1024;
 
 // количество точек вызова. Их должно хватать. если не хватает будет assert.
-static const uint32_t call_points = 4096;
+const uint32_t call_points = 4096;
 
 // Допустимое количество блоков на точку. во избежание лишней ругани.
-static const uint32_t block_limit = 1000;
+const uint32_t block_limit = 1000;
 
 // Отображать стек вызова. В случае лика.
-static const bool show_leak_callstack = true;
+const bool show_leak_callstack = true;
+
+// Типы операторов освобождения должны соответствовать операторам выделения.
+enum {
+	CLASS_C = 0,
+	CLASS_NEW = 1,
+	CLASS_NEW_ARRAY = 2,
+};
 
 // -----------------------------------------------------------------------------
 
 // Статистика использования памяти.
-static uint32_t memory_used = 0;
-static uint32_t memory_max_used = 0;
+uint32_t memory_used = 0;
+uint32_t memory_max_used = 0;
 
-static const uint8_t FFILL = 0xFB;
-static const uint32_t FFILL32 = 0xFBFBFBFB;
-static const uint8_t AFILL = 0xAB;
+const uint8_t FFILL = 0xFB;
+const uint32_t FFILL32 = 0xFBFBFBFB;
+const uint8_t AFILL = 0xAB;
 
 struct block_control {
 	uint32_t asize;	// aligned size
 	uint32_t cp;
 	uint32_t size;
 	uint32_t oldcp;
+	uint32_t aclass;	// класс операций памяти
+	uint32_t reserved[3];	// Можно было бы упихнуть в 16, ну да пофиг.
 };
 
 struct callpoint {
@@ -66,13 +77,13 @@ struct callpoint {
 	uint32_t size;
 };
 
-static bool isActive = false;
-static bool isLockable = false;
+bool isActive = false;
+bool isLockable = false;
 
-static pthread_mutex_t smutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t smutex = PTHREAD_MUTEX_INITIALIZER;
 
-static uint8_t sheap[heap_size];
-static struct callpoint scps[call_points];
+uint8_t sheap[heap_size];
+struct callpoint scps[call_points];
 
 // -----------------------------------------------------------------------------
 // Утилиты всякие
@@ -90,7 +101,6 @@ extern "C" void _libpthread_init(void *);
 extern "C" void _lock_destroy(void *);
 extern "C" void _rtld_free_tls(void *, size_t, size_t);
 
-static
 bool isFunction (void *func, uint32_t cp, size_t fsz)
 {
 	if ((uint32_t)func < cp && cp - (uint32_t)func < fsz)
@@ -104,7 +114,6 @@ bool isFunction (void *func, uint32_t cp, size_t fsz)
 // Было бы удобнее, если бы я мог получить имя функции по адресу.
 // Я не знаю как это сделать.
 
-static
 void *getReturnAddress (int level)
 {
 	switch (level) {
@@ -174,7 +183,6 @@ extern "C" void *_ZN5boost10statechart12simple_stateI6Opened8PppStateNS_3mpl4lis
 extern "C" void *_ZN5boost11multi_index21multi_index_containerIN13ClientManager11TimeoutInfoENS0_10indexed_byINS0_18ordered_non_uniqueINS0_6memberIS3_7timevalXadL_ZNS3_2tvEEEEEN4mpl_2naESA_EENS0_14ordered_uniqueINS6_IS3_SsXadL_ZNS3_4hookEEEEESA_SA_EESA_SA_SA_SA_SA_SA_SA_SA_SA_SA_SA_SA_SA_SA_SA_SA_SA_SA_EESaIS3_EE13allocate_nodeEv;
 extern "C" void *_ZN9__gnu_cxx13new_allocatorI7ClosingE8allocateEjPKv;
 
-static
 uint32_t getFilteredCallPoint(uint32_t ocp)
 {
 	if (	isFunction(&_ZNSs4_Rep9_S_createEjjRKSaIcE, ocp, 0x100) ||
@@ -229,7 +237,6 @@ uint32_t getFilteredCallPoint(uint32_t ocp)
 // -----------------------------------------------------------------------------
 // менеджер точек вызова
 
-static
 bool scallpointalloc(const struct block_control *block)
 {
 	for (uint32_t i = 0; i < call_points; i++) {
@@ -265,7 +272,6 @@ bool scallpointalloc(const struct block_control *block)
 	return false;
 }
 
-static
 bool scallpointfree(const struct block_control *block, uint32_t cp)
 {
 	assert(block->cp != 0);
@@ -290,13 +296,11 @@ bool scallpointfree(const struct block_control *block, uint32_t cp)
 // -----------------------------------------------------------------------------
 // Проверка переполнений блока
 
-static
 void sblock_tail_init (struct block_control *block, uint8_t *bptr)
 {
 	memset (bptr + sizeof(struct block_control) + block->size, AFILL, block->asize - block->size);
 }
 
-static
 void sblock_tail_check (struct block_control *block, uint8_t *bptr)
 {
 	// Проконтролируем хвост блока...
@@ -318,7 +322,6 @@ void sblock_tail_check (struct block_control *block, uint8_t *bptr)
 	assert (corrupted == 0);
 }
 
-static
 void sblock_tail_check_all ()
 {
 	for (uint8_t *bptr = sheap; bptr < sheap + heap_size; ) {
@@ -337,14 +340,12 @@ void sblock_tail_check_all ()
 // -----------------------------------------------------------------------------
 // Проверка содержимого свободных блоков.
 
-static
 void sblock_free_init (struct block_control *block, uint8_t *bptr)
 {
 	// Замусорим блок специально.
 	memset (bptr + sizeof(struct block_control), FFILL, block->asize);
 }
 
-static
 void sblock_free_check (struct block_control *block, uint8_t *bptr)
 {
 	if (block->oldcp == 0)	// Инициализационный блок.
@@ -366,7 +367,6 @@ void sblock_free_check (struct block_control *block, uint8_t *bptr)
 	assert (!modify);
 }
 
-static
 void sblock_free_check_all ()
 {
 	for (uint8_t *bptr = sheap; bptr < sheap + heap_size; ) {
@@ -385,7 +385,6 @@ void sblock_free_check_all ()
 // -----------------------------------------------------------------------------
 // Инициализация.
 
-static
 void sinit()
 {
 	struct block_control *block = reinterpret_cast<struct block_control *>(sheap);
@@ -418,7 +417,6 @@ void sinit()
 // -----------------------------------------------------------------------------
 // Переодические операции (статистика по памяти по любому плюс опциональные вещи)
 
-static
 void speriodic()
 {
 	// Счетчик выделений. Для отображения статистики памяти.
@@ -443,7 +441,6 @@ void speriodic()
 // -----------------------------------------------------------------------------
 // Дефрагментация хипа.
 
-static
 void sdefrag ()
 {
 	uint32_t maxfree = 0;
@@ -495,8 +492,7 @@ void sdefrag ()
 // -----------------------------------------------------------------------------
 // Очень простая реализация менеджера памяти
 
-static
-void *sonealloc (size_t size, uint32_t cp)
+void *sonealloc (size_t size, uint32_t cp, uint32_t aclass)
 {
 	speriodic();
 
@@ -535,6 +531,8 @@ void *sonealloc (size_t size, uint32_t cp)
 			assert (size <= block->asize);
 			block->size = size;
 
+			block->aclass = aclass;
+
 			if (check_tail) {
 				sblock_tail_init (block, bptr);
 			}
@@ -557,8 +555,7 @@ void *sonealloc (size_t size, uint32_t cp)
 	return 0;
 }
 
-static
-void *salloc (size_t size, uint32_t cp)
+void *salloc (size_t size, uint32_t cp, uint32_t aclass)
 {
 	assert (size < heap_size);
 
@@ -582,12 +579,12 @@ void *salloc (size_t size, uint32_t cp)
 
 	if (need_lock) pthread_mutex_lock (&smutex);
 
-	void *ptr = sonealloc (size, cp);
+	void *ptr = sonealloc (size, cp, aclass);
 
 	if (ptr == 0) {
 		// Дефрагментировать и попытаться снова.
 		sdefrag ();
-		ptr = sonealloc (size, cp);
+		ptr = sonealloc (size, cp, aclass);
 
 		if (ptr == 0) {
 			printf ("\t*** No memory for alloc(%u), called from 0x%08x\n", size, cp);
@@ -601,8 +598,7 @@ void *salloc (size_t size, uint32_t cp)
 	return ptr;
 }
 
-static
-void sfree (void *ptr, uint32_t cp)
+void sfree (void *ptr, uint32_t cp, uint32_t aclass)
 {
 	if (!isActive) sinit();
 
@@ -627,6 +623,22 @@ void sfree (void *ptr, uint32_t cp)
 			// Блок уже освобожден.
 			printf ("\t*** double free block %p from 0x%08x\n", ptr, cp);
 		} else {
+			if (block->aclass != aclass) {
+				assert (block->aclass < 3);
+				assert (aclass < 3);
+
+				const char *allocf[] = {"*alloc", "new", "new[]"};
+				const char *freef[] = {"free", "delete", "delete[]"};
+
+				//  Нарушение класса функций
+				printf ("\t*** block allocated over '%s' from 0x%08x, "
+					"free over '%s' from 0x%08x\n",
+					allocf[block->aclass], block->cp,
+					freef[aclass], cp);
+
+				assert(block->aclass != aclass);
+			}
+
 			if (scallpointfree (block, cp)) {
 				block->cp = 0;
 
@@ -655,10 +667,9 @@ void sfree (void *ptr, uint32_t cp)
 
 // Реаллоку необходимо знать прежний размер блока,
 // а это можно узнать только в менеджере.
-static
-void *srealloc (void *ptr, size_t size, uint32_t cp)
+void *srealloc (void *ptr, size_t size, uint32_t cp, uint32_t aclass)
 {
-	void *nptr = salloc (size, cp);
+	void *nptr = salloc (size, cp, aclass);
 
 	if (nptr == 0) return 0;
 
@@ -668,7 +679,7 @@ void *srealloc (void *ptr, size_t size, uint32_t cp)
 		memcpy (nptr, ptr, min(size, block->size));
 	}
 
-	sfree (ptr, cp);
+	sfree (ptr, cp, aclass);
 	return nptr;
 }
 
@@ -681,6 +692,8 @@ uint32_t getCallPoint(const void *stack)
 	return sptr[-1];
 }
 
+} // static namespace
+
 // -----------------------------------------------------------------------------
 // Заместители стандартных функций должны отслеживать точки из которых их вызывают
 
@@ -689,14 +702,14 @@ extern "C"
 void *malloc (size_t size)
 {
 	const uint32_t cp = getCallPoint(&size);
-	return salloc (size, cp);
+	return salloc (size, cp, CLASS_C);
 }
 
 extern "C"
 void *calloc (size_t number, size_t size)
 {
 	const uint32_t cp = getCallPoint(&number);
-	void *ptr = salloc (number * size, cp);
+	void *ptr = salloc (number * size, cp, CLASS_C);
 	// calloc возвращает чищенную память!
 	memset (ptr, 0, number * size);
 	return ptr;
@@ -706,7 +719,7 @@ extern "C"
 void *realloc (void *ptr, size_t size)
 {
 	const uint32_t cp = getCallPoint(&ptr);
-	return srealloc(ptr, size, cp);
+	return srealloc(ptr, size, cp, CLASS_C);
 }
 
 extern "C"
@@ -714,9 +727,9 @@ void *reallocf (void *ptr, size_t size)
 {
 	const uint32_t cp = getCallPoint(&ptr);
 
-	void *nptr = srealloc(ptr, size, cp);
+	void *nptr = srealloc(ptr, size, cp, CLASS_C);
 	if (nptr == 0 && ptr != 0)
-		sfree (ptr, cp);
+		sfree (ptr, cp, CLASS_C);
 
 	return nptr;
 }
@@ -725,7 +738,7 @@ extern "C"
 void free (void *ptr)
 {
 	const uint32_t cp = getCallPoint(&ptr);
-	sfree (ptr, cp);
+	sfree (ptr, cp, CLASS_C);
 }
 
 extern "C"
@@ -733,7 +746,7 @@ char *strdup(const char *str)
 {
 	const uint32_t cp = getCallPoint(&str);
 
-	char *str2 = reinterpret_cast<char *>(salloc(strlen(str) + 1, cp));
+	char *str2 = reinterpret_cast<char *>(salloc(strlen(str) + 1, cp, CLASS_C));
 	strcpy (str2, str);
 	return str2;
 }
@@ -742,23 +755,23 @@ char *strdup(const char *str)
 void *operator new(size_t size)
 {
 	const uint32_t cp = getCallPoint(&size);
-	return salloc (size, cp);
+	return salloc (size, cp, CLASS_NEW);
 }
 
 void operator delete (void *ptr) throw()
 {
 	const uint32_t cp = getCallPoint(&ptr);
-	sfree (ptr, cp);
+	sfree (ptr, cp, CLASS_NEW);
 }
 
 void *operator new[] (unsigned int size)
 {
 	const uint32_t cp = getCallPoint(&size);
-	return salloc (size, cp);
+	return salloc (size, cp, CLASS_NEW_ARRAY);
 }
 
 void operator delete[] (void *ptr) throw()
 {
 	const uint32_t cp = getCallPoint(&ptr);
-	sfree (ptr, cp);
+	sfree (ptr, cp, CLASS_NEW_ARRAY);
 }
