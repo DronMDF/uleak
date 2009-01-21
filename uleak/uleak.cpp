@@ -1,3 +1,7 @@
+//
+// Copyright (c) 2000-2008 Андрей Валяев (dron@infosec.ru)
+// This code is licenced under the GPL3 (http://www.gnu.org/licenses/#GPL)
+//
 
 #include <stdio.h>
 #include <string.h>
@@ -490,10 +494,33 @@ void sdefrag ()
 }
 
 // -----------------------------------------------------------------------------
+class slock {
+private:
+	enum lock_state { UNLOCKED, LOCKED };
+
+	static volatile lock_state m_lock;
+
+public:
+	slock() {
+		while (__sync_lock_test_and_set(&m_lock, LOCKED) == LOCKED) { };
+	}
+
+	~slock() {
+		__sync_lock_release(&m_lock);
+	}
+};
+
+volatile slock::lock_state slock::m_lock = UNLOCKED;
+
+// -----------------------------------------------------------------------------
 // Очень простая реализация менеджера памяти
+
+// Блокировки идут на этом уровне.
 
 void *sonealloc (size_t size, uint32_t cp, uint32_t aclass)
 {
+	if (!isActive) sinit();
+
 	speriodic();
 
 	const uint32_t asize = (size + tail_zone + 15) & ~15;
@@ -555,29 +582,82 @@ void *sonealloc (size_t size, uint32_t cp, uint32_t aclass)
 	return 0;
 }
 
+void sfree (void *ptr, uint32_t cp, uint32_t aclass)
+{
+	assert (isActive);
+
+	slock lock;
+
+	speriodic();
+
+	if (ptr < sheap || ptr >= sheap + heap_size) {
+		if (ptr != 0 || free_zero) {
+			printf ("\t*** free unknown block %p from 0x%08x\n", ptr, cp);
+		}
+
+		return;
+	}
+
+	uint8_t *bptr = reinterpret_cast<uint8_t *>(ptr) - sizeof (struct block_control);
+	struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
+
+	if (block->cp == 0 || block->cp == FFILL32) {
+		// Блок уже освобожден.
+		printf ("\t*** double free block %p from 0x%08x\n", ptr, cp);
+		return;
+	}
+
+	if (block->aclass != aclass) {
+		assert (block->aclass < 3);
+		assert (aclass < 3);
+
+		const char *allocf[] = {"*alloc", "new", "new[]"};
+		const char *freef[] = {"free", "delete", "delete[]"};
+
+		//  Нарушение класса функций
+		printf ("\t*** block allocated over '%s' from 0x%08x, "
+			"free over '%s' from 0x%08x\n",
+			allocf[block->aclass], block->cp,
+			freef[aclass], cp);
+
+		assert(block->aclass != aclass);
+		return;
+	}
+
+	if (!scallpointfree (block, cp)) {
+		printf ("\t*** free nonalloc block %p from 0x%08x\n", ptr, cp);
+		return;
+	}
+
+	if (check_tail) {
+		sblock_tail_check (block, bptr);
+	}
+
+	block->cp = 0;
+
+	if (check_free) {
+		sblock_free_init (block, bptr);
+	}
+
+	assert (memory_used >= block->size);
+	// статистика.
+	memory_used -= block->size;
+}
+
+uint32_t sblocksize(void *ptr)
+{
+	assert (isActive);
+	uint8_t *bptr = reinterpret_cast<uint8_t *>(ptr) - sizeof(struct block_control);
+	struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
+	assert (block->cp != 0);
+	return block->size;
+}
+
+// Это парочка вспомогательных неблокируемых функций.
+
 void *salloc (size_t size, uint32_t cp, uint32_t aclass)
 {
 	assert (size < heap_size);
-
-	if (!isActive) sinit();
-
-	bool need_lock = isLockable;
-
-	if (	isFunction ((void *)pthread_mutex_init, cp, 0x200) ||
-		isFunction ((void *)_lock_init, cp, 0x80) ||
-		isFunction ((void *)_kse_alloc, cp, 0x500) ||
-		isFunction ((void *)_kcb_ctor, cp, 0x40) ||
-		isFunction ((void *)_kseg_alloc, cp, 0x300) ||
-		isFunction ((void *)_lockuser_init, cp, 0x80) ||
-		isFunction ((void *)_pq_alloc, cp, 0x80) ||
-		isFunction ((void *)_thr_alloc, cp, 0x300) ||
-		isFunction ((void *)_rtld_allocate_tls, cp, 0x100) ||
-		isFunction ((void *)_libpthread_init, cp, 0x900))
-	{
-		need_lock = false;
-	}
-
-	if (need_lock) pthread_mutex_lock (&smutex);
 
 	void *ptr = sonealloc (size, cp, aclass);
 
@@ -593,76 +673,8 @@ void *salloc (size_t size, uint32_t cp, uint32_t aclass)
 		assert (ptr != 0);
 	}
 
-	if (need_lock) pthread_mutex_unlock (&smutex);
 	assert ((uint32_t)ptr % 16 == 0);
 	return ptr;
-}
-
-void sfree (void *ptr, uint32_t cp, uint32_t aclass)
-{
-	if (!isActive) sinit();
-
-	bool need_lock = isLockable;
-
-	if (	isFunction ((void *)_lock_destroy, cp, 0x40) ||
-		isFunction ((void *)_rtld_allocate_tls, cp, 0x100) ||
-		isFunction ((void *)_rtld_free_tls, cp, 0x40))
-	{
-		need_lock = false;
-	}
-
-	if (need_lock) pthread_mutex_lock (&smutex);
-
-	speriodic();
-
-	if (ptr > sheap && ptr < sheap + heap_size) {
-		uint8_t *bptr = reinterpret_cast<uint8_t *>(ptr) - sizeof (struct block_control);
-		struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
-
-		if (block->cp == 0 || block->cp == FFILL32) {
-			// Блок уже освобожден.
-			printf ("\t*** double free block %p from 0x%08x\n", ptr, cp);
-		} else {
-			if (block->aclass != aclass) {
-				assert (block->aclass < 3);
-				assert (aclass < 3);
-
-				const char *allocf[] = {"*alloc", "new", "new[]"};
-				const char *freef[] = {"free", "delete", "delete[]"};
-
-				//  Нарушение класса функций
-				printf ("\t*** block allocated over '%s' from 0x%08x, "
-					"free over '%s' from 0x%08x\n",
-					allocf[block->aclass], block->cp,
-					freef[aclass], cp);
-
-				assert(block->aclass != aclass);
-			}
-
-			if (scallpointfree (block, cp)) {
-				block->cp = 0;
-
-				if (check_tail) {
-					sblock_tail_check (block, bptr);
-				}
-
-				if (check_free) {
-					sblock_free_init (block, bptr);
-				}
-
-				assert (memory_used >= block->size);
-				memory_used -= block->size;
-			} else {
-				printf ("\t*** free nonalloc block %p from 0x%08x\n", ptr, cp);
-			}
-		}
-	} else {
-		if (ptr != 0 || free_zero) {
-			printf ("\t*** free unknown block %p from 0x%08x\n", ptr, cp);
-		}
-	}
-
-	if (need_lock) pthread_mutex_unlock (&smutex);
 }
 
 // Реаллоку необходимо знать прежний размер блока,
@@ -674,9 +686,7 @@ void *srealloc (void *ptr, size_t size, uint32_t cp, uint32_t aclass)
 	if (nptr == 0) return 0;
 
 	if (ptr != 0) {
-		uint8_t *bptr = reinterpret_cast<uint8_t *>(ptr) - sizeof(struct block_control);
-		struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
-		memcpy (nptr, ptr, min(size, block->size));
+		memcpy (nptr, ptr, min(size, sblocksize(ptr)));
 	}
 
 	sfree (ptr, cp, aclass);
