@@ -138,14 +138,18 @@ uint32_t __attribute__((deprecated)) getFilteredCallPoint(uint32_t ocp)
 	return ocp;
 }
 
-const char *getCallPonitName(uint32_t cp)
+const char *getCallPonitName(uint32_t cp, char *buf = 0, size_t size = 0)
 {
+	assert ((buf != 0 && size != 0) || (buf == 0 && size == 0));
+	
 	static char sym[80];
+	char *symbuf = (buf != 0) ? buf : sym;
+	size_t ss = (buf != 0) ? size : 80;
 
 	// TODO: прикрутить libunwind...
 
-	snprintf(sym, 80, "0x%08x", cp);
-	return sym;
+	snprintf(symbuf, ss, "0x%08x", cp);
+	return symbuf;
 }
 
 // -----------------------------------------------------------------------------
@@ -182,8 +186,9 @@ bool scallpointfree(const struct block_control *block, uint32_t cp)
 	for (uint32_t i = 0; i < call_points && scps[i].cp != 0; i++) {
 		if (scps[i].cp == block->cp) {
 			if (scps[i].current_blocks == 0) {
+				char aname[80], fname[80];
 				printf ("\t*** mextra free for block size %u allocated from %s, free from %s\n",
-					block->size, getCallPonitName(block->cp), getCallPonitName(cp));
+					block->size, getCallPonitName(block->cp, aname, 80), getCallPonitName(cp, fname, 80));
 			} else {
 				scps[i].current_blocks--;
 			}
@@ -509,10 +514,10 @@ void sfree (void *ptr, uint32_t cp, uint32_t aclass)
 		const char *freef[] = {"free", "delete", "delete[]"};
 
 		//  Нарушение класса функций
-		printf ("\t*** block allocated over '%s' from %s\n",
-			allocf[block->aclass], getCallPonitName(block->cp));
-		printf ("\t*** block free over '%s' from %s\n",
-			freef[aclass], getCallPonitName(cp));
+		char aname[80], fname[80];
+		printf ("\t*** block allocated over '%s' from %s, free over '%s' from %s\n",
+			allocf[block->aclass], getCallPonitName(block->cp, aname, 80),
+			freef[aclass], getCallPonitName(cp, fname, 80));
 
 		assert(block->aclass != aclass);
 		return;
