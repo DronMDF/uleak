@@ -12,13 +12,13 @@ VERSION_PATCH = 0
 VERSION=${VERSION_RELEASE}.${VERSION_BETA}.${VERSION_ALPHA}
 
 WFLAGS=-Wall -Wextra -Weffc++
-OFLAGS=-Os
+OFLAGS=-O0 -ggdb3
 CFLAGS=
 LDFLAGS=-lc -lstdc++
 
 ifneq ("${wildcard /usr/lib/libunwind*}x", "x")
 	CFLAGS+=-DLIBUNWIND
-	LDFLAGS=-lunwind -lunwind-generic
+	LDFLAGS+=-lunwind -lunwind-generic
 else
 	error Missing libunwind dependences
 endif
