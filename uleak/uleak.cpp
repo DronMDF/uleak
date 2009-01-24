@@ -49,9 +49,6 @@ const uint32_t call_points = 4096;
 // Допустимое количество блоков на точку. во избежание лишней ругани.
 const uint32_t block_limit = 1000;
 
-// Отображать стек вызова. В случае лика.
-const bool show_leak_callstack = false;
-
 // Типы операторов освобождения должны соответствовать операторам выделения.
 enum {
 	CLASS_C = 0,
@@ -141,6 +138,16 @@ uint32_t __attribute__((deprecated)) getFilteredCallPoint(uint32_t ocp)
 	return ocp;
 }
 
+const char *getCallPonitName(uint32_t cp)
+{
+	static char sym[80];
+
+	// TODO: прикрутить libunwind...
+
+	snprintf(sym, 80, "0x%08x", cp);
+	return sym;
+}
+
 // -----------------------------------------------------------------------------
 // менеджер точек вызова
 
@@ -155,23 +162,12 @@ bool scallpointalloc(const struct block_control *block)
 			{
 				scps[i].max_blocks = scps[i].current_blocks;
 
-				printf ("\t*** leak %u from 0x%08x with %ssize %u\n",
-					scps[i].max_blocks, block->cp,
+				printf ("\t*** leak %u from %s with %ssize %u\n",
+					scps[i].max_blocks, getCallPonitName(block->cp),
 					scps[i].size == block->size ? "" : "variable ", block->size);
-
-				if (show_leak_callstack) {
-					printf ("\t\t%p -> %p -> %p -> %p -> %p\n",
-						__builtin_return_address(7),
-						__builtin_return_address(6),
-						__builtin_return_address(5),
-						__builtin_return_address(4),
-						__builtin_return_address(3));
-				}
-
 			}
 
 			scps[i].size = block->size;
-
 			return true;
 		}
 	}
@@ -186,9 +182,8 @@ bool scallpointfree(const struct block_control *block, uint32_t cp)
 	for (uint32_t i = 0; i < call_points && scps[i].cp != 0; i++) {
 		if (scps[i].cp == block->cp) {
 			if (scps[i].current_blocks == 0) {
-				printf ("\t*** mextra free for block size %u allocated from 0x%08x, free from 0x%08x\n",
-					block->size, block->cp, cp);
-
+				printf ("\t*** mextra free for block size %u allocated from %s, free from %s\n",
+					block->size, getCallPonitName(block->cp), getCallPonitName(cp));
 			} else {
 				scps[i].current_blocks--;
 			}
@@ -221,8 +216,8 @@ void sblock_tail_check (struct block_control *block, uint8_t *bptr)
 	}
 
 	if (corrupted > 0) {
-		printf ("\t*** corrupted block tail, %u bytes, allocated from 0x%08x, size %u\n",
-			corrupted, block->cp, block->size);
+		printf ("\t*** corrupted block tail, %u bytes, allocated from %s, size %u\n",
+			corrupted, getCallPonitName(block->cp), block->size);
 	}
 
 	// Таких вещей быть не должно...
@@ -267,8 +262,8 @@ void sblock_free_check (struct block_control *block, uint8_t *bptr)
 	}
 
 	if (modify) {
-		printf ("\t*** modifyed free block %p, allocated from 0x%08x with size %u\n",
-			bptr + sizeof(struct block_control), block->oldcp, block->size);
+		printf ("\t*** modifyed free block %p, allocated from %s with size %u\n",
+			bptr + sizeof(struct block_control), getCallPonitName(block->oldcp), block->size);
 	}
 
 	assert (!modify);
@@ -491,7 +486,7 @@ void sfree (void *ptr, uint32_t cp, uint32_t aclass)
 
 	if (ptr < sheap || ptr >= sheap + heap_size) {
 		if (ptr != 0 || free_zero) {
-			printf ("\t*** free unknown block %p from 0x%08x\n", ptr, cp);
+			printf ("\t*** free unknown block %p from %s\n", ptr, getCallPonitName(cp));
 		}
 
 		return;
@@ -502,7 +497,7 @@ void sfree (void *ptr, uint32_t cp, uint32_t aclass)
 
 	if (block->cp == 0 || block->cp == FFILL32) {
 		// Блок уже освобожден.
-		printf ("\t*** double free block %p from 0x%08x\n", ptr, cp);
+		printf ("\t*** double free block %p from %s\n", ptr, getCallPonitName(cp));
 		return;
 	}
 
@@ -514,17 +509,17 @@ void sfree (void *ptr, uint32_t cp, uint32_t aclass)
 		const char *freef[] = {"free", "delete", "delete[]"};
 
 		//  Нарушение класса функций
-		printf ("\t*** block allocated over '%s' from 0x%08x, "
-			"free over '%s' from 0x%08x\n",
-			allocf[block->aclass], block->cp,
-			freef[aclass], cp);
+		printf ("\t*** block allocated over '%s' from %s\n",
+			allocf[block->aclass], getCallPonitName(block->cp));
+		printf ("\t*** block free over '%s' from %s\n",
+			freef[aclass], getCallPonitName(cp));
 
 		assert(block->aclass != aclass);
 		return;
 	}
 
 	if (!scallpointfree (block, cp)) {
-		printf ("\t*** free nonalloc block %p from 0x%08x\n", ptr, cp);
+		printf ("\t*** free nonalloc block %p from %s\n", ptr, getCallPonitName(cp));
 		return;
 	}
 
@@ -566,7 +561,7 @@ void *salloc (size_t size, uint32_t cp, uint32_t aclass)
 		ptr = sonealloc (size, cp, aclass);
 
 		if (ptr == 0) {
-			printf ("\t*** No memory for alloc(%u), called from 0x%08x\n", size, cp);
+			printf ("\t*** No memory for alloc(%u), called from %s\n", size, getCallPonitName(cp));
 		}
 
 		assert (ptr != 0);
