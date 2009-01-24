@@ -9,17 +9,32 @@ VERSION_BETA = 0
 VERSION_ALPHA = 1
 VERSION_PATCH = 0
 
-all: libuleak.a libuleak.so.${VERSION_RELEASE}.${VERSION_BETA}.${VERSION_ALPHA}
+VERSION=${VERSION_RELEASE}.${VERSION_BETA}.${VERSION_ALPHA}
+
+WFLAGS=-Wall -Wextra -Weffc++
+OFLAGS=-Os
+CFLAGS=
+LDFLAGS=-lc -lstdc++
+
+ifneq ("${wildcard /usr/lib/libunwind*}x", "x")
+	CFLAGS+=-DLIBUNWIND
+	LDFLAGS=-lunwind -lunwind-generic
+else
+	error Missing libunwind dependences
+endif
+
+
+all: libuleak.a libuleak.so.${VERSION}
 
 libuleak.a: uleak.o
 	ar r $@ $<
 	ranlib $@
 
-libuleak.so.${VERSION_RELEASE}.${VERSION_BETA}.${VERSION_ALPHA} : uleak.o
-	gcc -shared -Wl,-soname,libuleak.so.${VERSION_RELEASE} -o $@ $< -lc -lstdc++
+libuleak.so.${VERSION} : uleak.o
+	gcc -shared -Wl,-soname,libuleak.so.${VERSION_RELEASE} -o $@ $< ${LDFLAGS}
 
 uleak.o: uleak.cpp
-	g++ -Wall -Wextra -Weffc++ -fPIC -c -o $@ $<
+	g++ ${WFLAGS} ${OFLAGS} ${CFLAGS} -fPIC -c -o $@ $<
 
 .PHONY: clean
 clean:

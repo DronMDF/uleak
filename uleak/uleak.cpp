@@ -9,9 +9,13 @@
 #include <stdint.h>
 #include <unistd.h>
 
-#include <pthread.h>
-
 #include <algorithm>
+
+#ifdef LIBUNWIND
+#define UNW_LOCAL_ONLY
+#include <libunwind.h>
+#endif
+
 using namespace std;
 
 namespace {
@@ -82,9 +86,6 @@ struct callpoint {
 };
 
 bool isActive = false;
-bool isLockable = false;
-
-pthread_mutex_t smutex = PTHREAD_MUTEX_INITIALIZER;
 
 uint8_t sheap[heap_size];
 struct callpoint scps[call_points];
@@ -314,10 +315,6 @@ void sinit()
 	setvbuf(stdout, NULL, _IONBF, 0);
 
 	isActive = true;
-
-	pthread_mutex_init(&smutex, NULL);
-
-	isLockable = true;
 }
 
 // -----------------------------------------------------------------------------
@@ -600,19 +597,22 @@ void *srealloc (void *ptr, size_t size, uint32_t cp, uint32_t aclass)
 
 uint32_t getCallPoint(const void *stack)
 {
-	const uint32_t *sptr = reinterpret_cast<const uint32_t *>(stack);
-	return sptr[-1];
+#ifdef LIBUNWIND
+	// Релизация на libunwind, пока не проверена.
+	unw_context_t uc;
+	unw_getcontext(&uc);
 
-// 	// Релизация на libunwind, пока не проверена.	
-// 	unw_context_t uc;
-// 	unw_getcontext(&uc);
-// 
-// 	unw_cursor_t cursor;
-// 	unw_init_local(&cursor, &uc);
-// 
-// 	// Сразу выходим за пределы модуля.
-// 	unw_step(&cursor);
-// 
+	unw_cursor_t cursor;
+	unw_init_local(&cursor, &uc);
+
+	// Сразу выходим за пределы модуля.
+	unw_step(&cursor);
+	unw_step(&cursor);
+
+	unw_word_t ip;
+	unw_get_reg(&cursor, UNW_REG_IP, &ip);
+	return ip;
+
 // 	while (unw_step(&cursor) > 0) {
 // 		char sym[80];
 // 		unw_get_proc_name(&cursor, sym, 80, 0);
@@ -631,8 +631,11 @@ uint32_t getCallPoint(const void *stack)
 // 		if (getBlockCount(ip) < block_limit)
 // 			return ip;
 // 	}
-// 
-// 	return 0;
+#else
+	// TODO: Здесь переписать на __builtin_return_address
+	const uint32_t *sptr = reinterpret_cast<const uint32_t *>(stack);
+	return sptr[-1];
+#endif
 }
 
 } // static namespace
