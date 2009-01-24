@@ -22,32 +22,32 @@ namespace {
 
 // Частота вызова переодических операций.
 // Меряется количествами вызовов функций alloc/free
-const uint32_t operation_period = 3000;
+const uint32_t operation_period = 10000;
 
 // Ругаться на free(0)
 const bool free_zero = false;
 
 // Заполнение освобождаемых блоков и контроль использования после освобождения (может производиться с большо-о-ой задержкой)
-const bool check_free = true;
-const bool check_free_repetition = true;
+const bool check_free = false;
+const bool check_free_repetition = false;
 
 // Контролировать пространство за пределами блока
 const bool check_tail = true;
-const bool check_tail_repetition = true;
+const bool check_tail_repetition = false;
 // Размер буферной зоны
 const uint32_t tail_zone = check_tail ? 32 : 0;
 
 // Фильтровать стандартные функции из CallPoint's
-const bool function_filter = true;
+const bool function_filter = false;
 
 // 16 мегабайт - размер хипа. его должно хватать.
-const uint32_t heap_size = 32 * 1024 * 1024;
+const uint32_t heap_size = 64 * 1024 * 1024;
 
 // количество точек вызова. Их должно хватать. если не хватает будет assert.
-const uint32_t call_points = 4096;
+const uint32_t call_points = 8192;
 
 // Допустимое количество блоков на точку. во избежание лишней ругани.
-const uint32_t block_limit = 1000;
+const uint32_t block_limit = 50000;
 
 // Типы операторов освобождения должны соответствовать операторам выделения.
 enum {
@@ -146,8 +146,43 @@ const char *getCallPonitName(uint32_t cp, char *buf = 0, size_t size = 0)
 	char *symbuf = (buf != 0) ? buf : sym;
 	size_t ss = (buf != 0) ? size : 80;
 
-	// TODO: прикрутить libunwind...
+#ifdef LIBUNWIND
+	// libunwind несколько ограничен в этом плане тем, что может показывать
+	// символы толоько по курсору, который образуется только при обработке
+	// стека вызовов... возможны ситуации, когда адрес выделения не будет
+	// отображаться как имя.
+	unw_context_t uc;
+	unw_getcontext(&uc);
 
+	unw_cursor_t cursor;
+	unw_init_local(&cursor, &uc);
+
+	while (unw_step(&cursor) > 0) {
+		unw_proc_info_t info;
+		unw_get_proc_info(&cursor, &info);
+		if (info.start_ip == 0 || info.end_ip == 0)
+			continue;
+
+		if (cp >= info.start_ip && cp < info.end_ip) {
+			unw_get_proc_name (&cursor, symbuf, ss, 0);
+
+			if (cp - info.start_ip > 0) {
+				char off[12];
+				snprintf (off, 12, "+0x%x", cp - info.start_ip);
+
+				if (strlen(symbuf) + strlen(off) + 4 > ss) {
+					strcpy(symbuf + ss - strlen(off) - 4, "...");
+				}
+
+				strcat(symbuf, off);
+			}
+
+			return symbuf;
+		}
+	}
+#endif
+
+	// Это как фоллбек даже для libunwind.
 	snprintf(symbuf, ss, "0x%08x", cp);
 	return symbuf;
 }
