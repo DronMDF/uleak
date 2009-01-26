@@ -36,6 +36,10 @@ libuleak.so.${VERSION} : uleak.o
 uleak.o: uleak.cpp
 	g++ ${WFLAGS} ${OFLAGS} ${CFLAGS} -fPIC -c -o $@ $<
 
+benchmark: benchmark.cpp libuleak.a
+	g++ ${WFLAGS} ${OFLAGS} ${CFLAGS} -o $@ $< libuleak.a ${LDFLAGS} -lrt
+	./$@
+
 .PHONY: clean
 clean:
-	rm -f libuleak.* uleak.o
+	rm -f libuleak.* uleak.o benchmark
