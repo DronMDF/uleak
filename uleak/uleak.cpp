@@ -73,6 +73,7 @@ struct block_control {
 	uint32_t oldcp;
 	uint32_t aclass;	// класс операций памяти
 	uint32_t reserved[3];	// Можно было бы упихнуть в 16, ну да пофиг.
+				// Я сюда потом линки запихну.
 };
 
 struct callpoint {
@@ -102,41 +103,6 @@ bool isFunction (void *func, uint32_t cp, size_t fsz)
 // Фильтрация стандартный функций из стека вызова.
 // Было бы удобнее, если бы я мог получить имя функции по адресу.
 // Я не знаю как это сделать.
-
-void *getReturnAddress (int level)
-{
-	switch (level) {
-		case 0: return __builtin_return_address(0);
-		case 1: return __builtin_return_address(1);
-		case 2: return __builtin_return_address(2);
-		case 3: return __builtin_return_address(3);
-		case 4: return __builtin_return_address(4);
-		case 5: return __builtin_return_address(5);
-		case 6: return __builtin_return_address(6);
-		case 7: return __builtin_return_address(7);
-		case 8: return __builtin_return_address(8);
-		case 9: return __builtin_return_address(9);
-		case 10: return __builtin_return_address(10);
-		case 11: return __builtin_return_address(11);
-		case 12: return __builtin_return_address(12);
-		case 13: return __builtin_return_address(13);
-		case 14: return __builtin_return_address(14);
-		case 15: return __builtin_return_address(15);
-		case 16: return __builtin_return_address(16);
-		case 17: return __builtin_return_address(17);
-		case 18: return __builtin_return_address(18);
-		case 19: return __builtin_return_address(19);
-		default: break;
-	}
-
-	return 0;
-}
-
-// Все будет сделано по другому.
-uint32_t __attribute__((deprecated)) getFilteredCallPoint(uint32_t ocp)
-{
-	return ocp;
-}
 
 const char *getCallPonitName(uint32_t cp, char *buf = 0, size_t size = 0)
 {
@@ -449,14 +415,12 @@ volatile slock::lock_state slock::m_lock = UNLOCKED;
 // -----------------------------------------------------------------------------
 // Очень простая реализация менеджера памяти
 
-// Блокировки идут на этом уровне.
+// TODO: Для ускорения работы менеджера необходимо ввести очереди блоков. Только
+//	вместо ссылок в них можно хранить смещения относительно sheap. Это будет
+//	удобнее в плане переносимости.
 
-void *sonealloc (size_t size, uint32_t cp, uint32_t aclass)
+void *salloc_internal (size_t size, uint32_t cp, uint32_t aclass)
 {
-	if (!isActive) sinit();
-
-	speriodic();
-
 	const uint32_t asize = (size + tail_zone + 15) & ~15;
 
 	for (uint8_t *bptr = sheap; bptr < sheap + heap_size; ) {
@@ -483,11 +447,7 @@ void *sonealloc (size_t size, uint32_t cp, uint32_t aclass)
 				block->asize = block->size = asize;
 			}
 
-			if (function_filter) {
-				block->oldcp = block->cp = getFilteredCallPoint(cp);
-			} else {
-				block->oldcp = block->cp = cp;
-			}
+			block->oldcp = block->cp = cp;
 
 			assert (size <= block->asize);
 			block->size = size;
@@ -516,14 +476,8 @@ void *sonealloc (size_t size, uint32_t cp, uint32_t aclass)
 	return 0;
 }
 
-void sfree (void *ptr, uint32_t cp, uint32_t aclass)
+void sfree_internal (void *ptr, uint32_t cp, uint32_t aclass)
 {
-	assert (isActive);
-
-	slock lock;
-
-	speriodic();
-
 	if (ptr < sheap || ptr >= sheap + heap_size) {
 		if (ptr != 0 || free_zero) {
 			printf ("\t*** free unknown block %p from %s\n", ptr, getCallPonitName(cp));
@@ -578,27 +532,20 @@ void sfree (void *ptr, uint32_t cp, uint32_t aclass)
 	memory_used -= block->size;
 }
 
-uint32_t sblocksize(void *ptr)
-{
-	assert (isActive);
-	uint8_t *bptr = reinterpret_cast<uint8_t *>(ptr) - sizeof(struct block_control);
-	struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
-	assert (block->cp != 0);
-	return block->size;
-}
-
-// Это парочка вспомогательных неблокируемых функций.
-
+// -----------------------------------------------------------------------------
+// Интерфейсные функции обеспечивают блокировки и всякую фигню.
 void *salloc (size_t size, uint32_t cp, uint32_t aclass)
 {
 	assert (size < heap_size);
+	if (!isActive) sinit();
+	slock lock;
+	speriodic();
 
-	void *ptr = sonealloc (size, cp, aclass);
-
+	void *ptr = salloc_internal (size, cp, aclass);
 	if (ptr == 0) {
 		// Дефрагментировать и попытаться снова.
 		sdefrag ();
-		ptr = sonealloc (size, cp, aclass);
+		ptr = salloc_internal (size, cp, aclass);
 
 		if (ptr == 0) {
 			printf ("\t*** No memory for alloc(%u), called from %s\n", size, getCallPonitName(cp));
@@ -611,8 +558,36 @@ void *salloc (size_t size, uint32_t cp, uint32_t aclass)
 	return ptr;
 }
 
-// Реаллоку необходимо знать прежний размер блока,
-// а это можно узнать только в менеджере.
+void sfree (void *ptr, uint32_t cp, uint32_t aclass)
+{
+	assert (isActive);
+	slock lock;
+	speriodic();
+	sfree_internal(ptr, cp, aclass);
+}
+
+uint32_t sblocksize(void *ptr)
+{
+	assert (isActive);
+	slock lock;
+
+	uint8_t *bptr = reinterpret_cast<uint8_t *>(ptr) - sizeof(struct block_control);
+	struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
+	assert (block->cp != 0);
+	return block->size;
+}
+
+uint32_t sblockcount(uint32_t cp)
+{
+	if (!isActive) sinit();
+
+	slock lock;
+
+	// TODO: определить количество блоков в этой точке вызова.
+	return 0;
+}
+
+// Неблокируемая функция, но ей необходимо знать размер блока.
 void *srealloc (void *ptr, size_t size, uint32_t cp, uint32_t aclass)
 {
 	void *nptr = salloc (size, cp, aclass);
@@ -630,7 +605,38 @@ void *srealloc (void *ptr, size_t size, uint32_t cp, uint32_t aclass)
 // -----------------------------------------------------------------------------
 // Определение точек вызова
 
-uint32_t getCallPoint(const void *stack)
+#ifndef LIBUNWIND
+void *getReturnAddress (int level)
+{
+	switch (level) {
+		case 0: return __builtin_return_address(0);
+		case 1: return __builtin_return_address(1);
+		case 2: return __builtin_return_address(2);
+		case 3: return __builtin_return_address(3);
+		case 4: return __builtin_return_address(4);
+		case 5: return __builtin_return_address(5);
+		case 6: return __builtin_return_address(6);
+		case 7: return __builtin_return_address(7);
+		case 8: return __builtin_return_address(8);
+		case 9: return __builtin_return_address(9);
+		case 10: return __builtin_return_address(10);
+		case 11: return __builtin_return_address(11);
+		case 12: return __builtin_return_address(12);
+		case 13: return __builtin_return_address(13);
+		case 14: return __builtin_return_address(14);
+		case 15: return __builtin_return_address(15);
+		case 16: return __builtin_return_address(16);
+		case 17: return __builtin_return_address(17);
+		case 18: return __builtin_return_address(18);
+		case 19: return __builtin_return_address(19);
+		default: break;
+	}
+
+	return 0;
+}
+#endif
+
+uint32_t getCallPoint()
 {
 #ifdef LIBUNWIND
 	// Релизация на libunwind, пока не проверена.
@@ -682,14 +688,14 @@ uint32_t getCallPoint(const void *stack)
 extern "C"
 void *malloc (size_t size)
 {
-	const uint32_t cp = getCallPoint(&size);
+	const uint32_t cp = getCallPoint();
 	return salloc (size, cp, CLASS_C);
 }
 
 extern "C"
 void *calloc (size_t number, size_t size)
 {
-	const uint32_t cp = getCallPoint(&number);
+	const uint32_t cp = getCallPoint();
 	void *ptr = salloc (number * size, cp, CLASS_C);
 	// calloc возвращает чищенную память!
 	memset (ptr, 0, number * size);
@@ -699,14 +705,14 @@ void *calloc (size_t number, size_t size)
 extern "C"
 void *realloc (void *ptr, size_t size)
 {
-	const uint32_t cp = getCallPoint(&ptr);
+	const uint32_t cp = getCallPoint();
 	return srealloc(ptr, size, cp, CLASS_C);
 }
 
 extern "C"
 void *reallocf (void *ptr, size_t size)
 {
-	const uint32_t cp = getCallPoint(&ptr);
+	const uint32_t cp = getCallPoint();
 
 	void *nptr = srealloc(ptr, size, cp, CLASS_C);
 	if (nptr == 0 && ptr != 0)
@@ -718,14 +724,14 @@ void *reallocf (void *ptr, size_t size)
 extern "C"
 void free (void *ptr)
 {
-	const uint32_t cp = getCallPoint(&ptr);
+	const uint32_t cp = getCallPoint();
 	sfree (ptr, cp, CLASS_C);
 }
 
 extern "C"
 char *strdup(const char *str)
 {
-	const uint32_t cp = getCallPoint(&str);
+	const uint32_t cp = getCallPoint();
 
 	char *str2 = reinterpret_cast<char *>(salloc(strlen(str) + 1, cp, CLASS_C));
 	strcpy (str2, str);
@@ -735,24 +741,24 @@ char *strdup(const char *str)
 // с++ runtime.
 void *operator new(size_t size)
 {
-	const uint32_t cp = getCallPoint(&size);
+	const uint32_t cp = getCallPoint();
 	return salloc (size, cp, CLASS_NEW);
 }
 
 void operator delete (void *ptr) throw()
 {
-	const uint32_t cp = getCallPoint(&ptr);
+	const uint32_t cp = getCallPoint();
 	sfree (ptr, cp, CLASS_NEW);
 }
 
 void *operator new[] (unsigned int size)
 {
-	const uint32_t cp = getCallPoint(&size);
+	const uint32_t cp = getCallPoint();
 	return salloc (size, cp, CLASS_NEW_ARRAY);
 }
 
 void operator delete[] (void *ptr) throw()
 {
-	const uint32_t cp = getCallPoint(&ptr);
+	const uint32_t cp = getCallPoint();
 	sfree (ptr, cp, CLASS_NEW_ARRAY);
 }
