@@ -46,9 +46,6 @@ const bool check_tail_repetition = false;
 // Размер буферной зоны
 const uint32_t tail_zone = check_tail ? 32 : 0;
 
-// Фильтровать стандартные функции из CallPoint's
-const bool function_filter = false;
-
 // размер хипа.
 const uint32_t heap_size = 64 * 1024 * 1024;
 
@@ -100,9 +97,11 @@ bool isActive = false;
 
 uint8_t sheap[heap_size];
 
+typedef uint32_t callpoint_t;
+
 // -----------------------------------------------------------------------------
 
-const char *getCallPonitName(uint32_t cp, char *buf = 0, size_t size = 0)
+const char *getCallPonitName(callpoint_t cp, char *buf = 0, size_t size = 0)
 {
 	assert ((buf != 0 && size != 0) || (buf == 0 && size == 0));
 
@@ -156,7 +155,7 @@ namespace cpmgr {
 // менеджер точек вызова
 
 struct callpoint_stat {
-	uint32_t cp;
+	callpoint_t cp;
 	uint32_t current_blocks;
 	uint32_t max_blocks;
 	uint32_t size;
@@ -174,7 +173,7 @@ void init()
 	}
 }
 
-int scallpointalloc(const struct block_control *block, uint32_t cp)
+int scallpointalloc(const struct block_control *block, callpoint_t cp)
 {
 	for (int i = 0; i < call_points; i++) {
 		if (cparray[i].cp == cp || cparray[i].cp == 0) {
@@ -198,7 +197,7 @@ int scallpointalloc(const struct block_control *block, uint32_t cp)
 	return -1;
 }
 
-void scallpointfree(const struct block_control *block, uint32_t cp)
+void scallpointfree(const struct block_control *block, callpoint_t cp)
 {
 	const int i = block->cp_idx;
 	assert(i >= 0 && i < call_points);
@@ -212,7 +211,7 @@ void scallpointfree(const struct block_control *block, uint32_t cp)
 	}
 }
 
-uint32_t getCallPoint(int idx)
+callpoint_t getCallPoint(int idx)
 {
 	assert (idx >= 0 && idx < call_points);
 	return cparray[idx].cp;
@@ -343,15 +342,11 @@ void speriodic()
 }
 
 // -----------------------------------------------------------------------------
-// Дефрагментация хипа.
-
-// -----------------------------------------------------------------------------
-// -----------------------------------------------------------------------------
 // Очень простая реализация менеджера памяти
 
 namespace heapmgr {
 
-void *alloc (size_t size, uint32_t cp, uint32_t aclass)
+void *alloc (size_t size, callpoint_t cp, uint32_t aclass)
 {
 	const uint32_t asize = (size + tail_zone + 15) & ~15;
 
@@ -402,7 +397,7 @@ void *alloc (size_t size, uint32_t cp, uint32_t aclass)
 	return 0;
 }
 
-void free (void *ptr, uint32_t cp, uint32_t aclass)
+void free (void *ptr, callpoint_t cp, uint32_t aclass)
 {
 	if (ptr < sheap || ptr >= sheap + heap_size) {
 		if (ptr != 0 || free_zero) {
@@ -416,6 +411,8 @@ void free (void *ptr, uint32_t cp, uint32_t aclass)
 	struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
 
 	if ((block->flags & BF_USED) == 0 || block->flags == FFILL) {
+		// Прогнать цепочку блоков, чтобы проверить корректность и актуальность этого.
+
 		// Блок уже освобожден.
 		printf ("\t*** double free block %p from %s\n", ptr, getCallPonitName(cp));
 		return;
@@ -511,7 +508,7 @@ public:
 
 volatile lock_t::lock_state lock_t::m_lock = UNLOCKED;
 
-void *alloc (size_t size, uint32_t cp, uint32_t aclass)
+void *alloc (size_t size, callpoint_t cp, uint32_t aclass)
 {
 	assert (size < heap_size);
 	if (!isActive) sinit();
@@ -534,7 +531,7 @@ void *alloc (size_t size, uint32_t cp, uint32_t aclass)
 	return ptr;
 }
 
-void free (void *ptr, uint32_t cp, uint32_t aclass)
+void free (void *ptr, callpoint_t cp, uint32_t aclass)
 {
 	assert(isActive);
 	lock_t lock;
@@ -552,7 +549,7 @@ uint32_t blocksize(void *ptr)
 	return block->size;
 }
 
-uint32_t blockcount(uint32_t cp)
+uint32_t blockcount(callpoint_t cp)
 {
 	if (!isActive) sinit();
 	lock_t lock;
@@ -562,7 +559,7 @@ uint32_t blockcount(uint32_t cp)
 }
 
 // Неблокируемая функция, но ей необходимо знать размер блока.
-void *realloc (void *ptr, size_t size, uint32_t cp, uint32_t aclass)
+void *realloc (void *ptr, size_t size, callpoint_t cp, uint32_t aclass)
 {
 	void *nptr = alloc(size, cp, aclass);
 
@@ -612,7 +609,7 @@ void *getReturnAddress (int level)
 }
 #endif
 
-uint32_t getCallPoint()
+callpoint_t getCallPoint()
 {
 #ifdef LIBUNWIND
 	// Релизация на libunwind, пока не проверена.
@@ -649,7 +646,7 @@ uint32_t getCallPoint()
 // 			return ip;
 // 	}
 #else
-	return reinterpret_cast<uint32_t>(getReturnAddress(1));
+	return reinterpret_cast<callpoint_t>(getReturnAddress(1));
 #endif
 }
 
@@ -662,14 +659,14 @@ uint32_t getCallPoint()
 extern "C"
 void *malloc (size_t size)
 {
-	const uint32_t cp = getCallPoint();
+	const callpoint_t cp = getCallPoint();
 	return heapif::alloc(size, cp, CLASS_C);
 }
 
 extern "C"
 void *calloc (size_t number, size_t size)
 {
-	const uint32_t cp = getCallPoint();
+	const callpoint_t cp = getCallPoint();
 	void *ptr = heapif::alloc(number * size, cp, CLASS_C);
 	// calloc возвращает чищенную память!
 	memset(ptr, 0, number * size);
@@ -679,14 +676,14 @@ void *calloc (size_t number, size_t size)
 extern "C"
 void *realloc (void *ptr, size_t size)
 {
-	const uint32_t cp = getCallPoint();
+	const callpoint_t cp = getCallPoint();
 	return heapif::realloc(ptr, size, cp, CLASS_C);
 }
 
 extern "C"
 void *reallocf (void *ptr, size_t size)
 {
-	const uint32_t cp = getCallPoint();
+	const callpoint_t cp = getCallPoint();
 
 	void *nptr = heapif::realloc(ptr, size, cp, CLASS_C);
 	if (nptr == 0 && ptr != 0) {
@@ -699,14 +696,14 @@ void *reallocf (void *ptr, size_t size)
 extern "C"
 void free (void *ptr)
 {
-	const uint32_t cp = getCallPoint();
+	const callpoint_t cp = getCallPoint();
 	heapif::free (ptr, cp, CLASS_C);
 }
 
 extern "C"
 char *strdup(const char *str)
 {
-	const uint32_t cp = getCallPoint();
+	const callpoint_t cp = getCallPoint();
 
 	char *str2 = reinterpret_cast<char *>(heapif::alloc(strlen(str) + 1, cp, CLASS_C));
 	strcpy (str2, str);
@@ -716,24 +713,24 @@ char *strdup(const char *str)
 // с++ runtime.
 void *operator new(size_t size)
 {
-	const uint32_t cp = getCallPoint();
+	const callpoint_t cp = getCallPoint();
 	return heapif::alloc(size, cp, CLASS_NEW);
 }
 
 void operator delete (void *ptr) throw()
 {
-	const uint32_t cp = getCallPoint();
+	const callpoint_t cp = getCallPoint();
 	heapif::free(ptr, cp, CLASS_NEW);
 }
 
 void *operator new[] (unsigned int size)
 {
-	const uint32_t cp = getCallPoint();
+	const callpoint_t cp = getCallPoint();
 	return heapif::alloc (size, cp, CLASS_NEW_ARRAY);
 }
 
 void operator delete[] (void *ptr) throw()
 {
-	const uint32_t cp = getCallPoint();
+	const callpoint_t cp = getCallPoint();
 	heapif::free(ptr, cp, CLASS_NEW_ARRAY);
 }
