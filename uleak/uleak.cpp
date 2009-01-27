@@ -11,6 +11,8 @@
 
 #include <algorithm>
 
+#include <boost/static_assert.hpp>
+
 #ifdef LIBUNWIND
 #define UNW_LOCAL_ONLY
 #include <libunwind.h>
@@ -55,6 +57,7 @@ const uint32_t heap_size = 64 * 1024 * 1024;
 
 // количество точек вызова. Их должно хватать. если не хватает будет assert.
 const uint32_t call_points = 8192;
+BOOST_STATIC_ASSERT(call_points <= (1 << 16));
 
 // Допустимое количество блоков на точку. во избежание лишней ругани.
 const uint32_t block_limit = 50000;
@@ -78,13 +81,18 @@ const uint8_t AFILL = 0xAB;
 
 struct block_control {
 	uint32_t asize;	// aligned size
-	uint32_t cp;
 	uint32_t size;
+	uint16_t cp_idx;
+	uint8_t aclass;	// класс операций памяти
+	uint8_t used;
+
+	uint32_t cp;
 	uint32_t oldcp;
-	uint32_t aclass;	// класс операций памяти
-	uint32_t reserved[3];	// Можно было бы упихнуть в 16, ну да пофиг.
-				// Я сюда потом линки запихну.
-};
+	uint32_t reserved[3];
+} __attribute__((packed));
+
+// Потом сокращу до 16
+BOOST_STATIC_ASSERT(sizeof(struct block_control) == 32);
 
 struct callpoint {
 	uint32_t cp;
@@ -97,17 +105,6 @@ bool isActive = false;
 
 uint8_t sheap[heap_size];
 struct callpoint scps[call_points];
-
-// -----------------------------------------------------------------------------
-// Утилиты всякие
-
-bool isFunction (void *func, uint32_t cp, size_t fsz)
-{
-	if ((uint32_t)func < cp && cp - (uint32_t)func < fsz)
-		return true;
-
-	return false;
-}
 
 // -----------------------------------------------------------------------------
 // Фильтрация стандартный функций из стека вызова.
@@ -166,23 +163,23 @@ const char *getCallPonitName(uint32_t cp, char *buf = 0, size_t size = 0)
 // -----------------------------------------------------------------------------
 // менеджер точек вызова
 
-bool scallpointalloc(const struct block_control *block)
+bool scallpointalloc(struct block_control *block)
 {
 	for (uint32_t i = 0; i < call_points; i++) {
 		if (scps[i].cp == block->cp || scps[i].cp == 0) {
 			scps[i].current_blocks++;
 			scps[i].cp = block->cp;
 
-			if (scps[i].current_blocks > scps[i].max_blocks)
-			{
+			if (scps[i].current_blocks > scps[i].max_blocks) {
 				scps[i].max_blocks = scps[i].current_blocks;
 
 				printf ("\t*** leak %u from %s with %ssize %u\n",
-					scps[i].max_blocks, getCallPonitName(block->cp),
+					scps[i].max_blocks, getCallPonitName(scps[i].cp),
 					scps[i].size == block->size ? "" : "variable ", block->size);
 			}
 
 			scps[i].size = block->size;
+			block->cp_idx = i;
 			return true;
 		}
 	}
@@ -190,25 +187,18 @@ bool scallpointalloc(const struct block_control *block)
 	return false;
 }
 
-bool scallpointfree(const struct block_control *block, uint32_t cp)
+void scallpointfree(const struct block_control *block, uint32_t cp)
 {
-	assert(block->cp != 0);
+	const int i = block->cp_idx;
+	assert(scps[i].cp == block->cp);
 
-	for (uint32_t i = 0; i < call_points && scps[i].cp != 0; i++) {
-		if (scps[i].cp == block->cp) {
-			if (scps[i].current_blocks == 0) {
-				char aname[80], fname[80];
-				printf ("\t*** mextra free for block size %u allocated from %s, free from %s\n",
-					block->size, getCallPonitName(block->cp, aname, 80), getCallPonitName(cp, fname, 80));
-			} else {
-				scps[i].current_blocks--;
-			}
-
-			return true;
-		}
+	if (scps[i].current_blocks == 0) {
+		char aname[80], fname[80];
+		printf ("\t*** extra free for block size %u allocated from %s, free from %s\n",
+			block->size, getCallPonitName(scps[i].cp, aname, 80), getCallPonitName(cp, fname, 80));
+	} else {
+		scps[i].current_blocks--;
 	}
-
-	return false;
 }
 
 // -----------------------------------------------------------------------------
@@ -522,10 +512,7 @@ void sfree_internal (void *ptr, uint32_t cp, uint32_t aclass)
 		return;
 	}
 
-	if (!scallpointfree (block, cp)) {
-		printf ("\t*** free nonalloc block %p from %s\n", ptr, getCallPonitName(cp));
-		return;
-	}
+	scallpointfree (block, cp);
 
 	if (check_tail) {
 		sblock_tail_check (block, bptr);
