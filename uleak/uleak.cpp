@@ -89,6 +89,8 @@ struct block_control {
 	uint32_t cp;
 	uint32_t oldcp;
 	uint32_t reserved[3];
+
+	uint8_t ptr[0];
 } __attribute__((packed));
 
 // Потом сокращу до 16
@@ -218,40 +220,36 @@ void scallpointfree(const struct block_control *block, uint32_t cp)
 // -----------------------------------------------------------------------------
 // Проверка переполнений блока
 
-void sblock_tail_init (struct block_control *block, uint8_t *bptr)
+void sblock_tail_init (struct block_control *block)
 {
-	memset (bptr + sizeof(struct block_control) + block->size, AFILL, block->asize - block->size);
+	if (!check_tail) return;
+	memset (block->ptr + block->size, AFILL, block->asize - block->size);
 }
 
-void sblock_tail_check (struct block_control *block, uint8_t *bptr)
+void sblock_tail_check (const struct block_control *block)
 {
-	// Проконтролируем хвост блока...
-	int corrupted = 0;
+	if (!check_tail) return;
 
 	for (int i = block->asize - block->size - 1; i >= 0; i--) {
-		if (bptr[sizeof(struct block_control) + block->size + i] != AFILL) {
-			corrupted = i;
-			break;
+		if (block->ptr[block->size + i] != AFILL) {
+			printf ("\t*** corrupted block tail, %u bytes, allocated from %s, size %u\n",
+				i, getCallPonitName(block->cp), block->size);
+			assert (false);
 		}
 	}
 
-	if (corrupted > 0) {
-		printf ("\t*** corrupted block tail, %u bytes, allocated from %s, size %u\n",
-			corrupted, getCallPonitName(block->cp), block->size);
-	}
-
-	// Таких вещей быть не должно...
-	assert (corrupted == 0);
 }
 
 void sblock_tail_check_all ()
 {
+	if (!check_tail_repetition) return;
+
 	for (uint8_t *bptr = sheap; bptr < sheap + heap_size; ) {
 		struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
 		assert (block->asize % 16 == 0);
 
 		if (block->cp != 0) {
-			sblock_tail_check (block, bptr);
+			sblock_tail_check (block);
 		}
 
 		bptr += sizeof(struct block_control) + block->asize;
@@ -262,41 +260,39 @@ void sblock_tail_check_all ()
 // -----------------------------------------------------------------------------
 // Проверка содержимого свободных блоков.
 
-void sblock_free_init (struct block_control *block, uint8_t *bptr)
+void sblock_free_init (struct block_control *block)
 {
+	if (!check_free) return;
+	if (block->oldcp == 0) return;
+
 	// Замусорим блок специально.
-	memset (bptr + sizeof(struct block_control), FFILL, block->asize);
+	memset (block->ptr, FFILL, block->asize);
 }
 
-void sblock_free_check (struct block_control *block, uint8_t *bptr)
+void sblock_free_check (const struct block_control *block)
 {
-	if (block->oldcp == 0)	// Инициализационный блок.
-		return;
-
-	bool modify = false;
+	if (!check_free) return;
+	if (block->oldcp == 0) return;
 
 	for (uint32_t i = 0; i < block->asize; i++) {
-		if (bptr[sizeof(struct block_control) + i] != FFILL) {
-			modify = true;
+		if (block->ptr[i] != FFILL) {
+			printf ("\t*** modifyed free block %p, allocated from %s with size %u\n",
+				block->ptr, getCallPonitName(block->oldcp), block->size);
+			assert(false);
 		}
 	}
-
-	if (modify) {
-		printf ("\t*** modifyed free block %p, allocated from %s with size %u\n",
-			bptr + sizeof(struct block_control), getCallPonitName(block->oldcp), block->size);
-	}
-
-	assert (!modify);
 }
 
 void sblock_free_check_all ()
 {
+	if (!check_free_repetition) return;
+
 	for (uint8_t *bptr = sheap; bptr < sheap + heap_size; ) {
 		struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
 		assert (block->asize % 16 == 0);
 
 		if (block->cp == 0) {
-			sblock_free_check (block, bptr);
+			sblock_free_check (block);
 		}
 
 		bptr += sizeof(struct block_control) + block->asize;
@@ -315,9 +311,7 @@ void sinit()
 	block->asize = block->size = heap_size - sizeof(struct block_control);
 	assert (block->asize % 16 == 0);
 
-	if (check_free) {
-		sblock_free_init(block, sheap);
-	}
+	sblock_free_init(block);
 
 	cpmgr::init();
 
@@ -342,13 +336,8 @@ void speriodic()
 	// Статистика использования памяти.
 	printf ("\t*** Heap used: %u, max: %u\n", memory_used, memory_max_used);
 
-	if (check_tail_repetition) {
-		sblock_tail_check_all();
-	}
-
-	if (check_free_repetition) {
-		sblock_free_check_all();
-	}
+	sblock_tail_check_all();
+	sblock_free_check_all();
 }
 
 // -----------------------------------------------------------------------------
@@ -363,30 +352,24 @@ void sdefrag ()
 		assert (block->asize % 16 == 0);
 
 		if (block->cp == 0) {
-			if (check_free) {
-				sblock_free_check(block, bptr);
-			}
+			sblock_free_check(block);
 
 			while (true) {
-				uint8_t *nbptr = bptr + sizeof(struct block_control) + block->asize;
+				uint8_t *nbptr = block->ptr + block->asize;
 				if (nbptr >= sheap + heap_size) break;
 
 				struct block_control *nblock = reinterpret_cast<struct block_control *>(nbptr);
 				assert (nblock->asize % 16 == 0);
 				if (nblock->cp != 0) break;
 
-				if (check_free) {
-					sblock_free_check (nblock, nbptr);
-				}
+				sblock_free_check (nblock);
 
 				block->oldcp = 0;	// Мы его уже проверили.
 				block->asize += sizeof(struct block_control) + nblock->asize;
 				block->size = block->asize;
 			}
 
-			if (check_free) {
-				sblock_free_init(block, bptr);
-			}
+			sblock_free_init(block);
 
 			if (block->asize > maxfree) {
 				maxfree = block->asize;
@@ -439,9 +422,7 @@ void *salloc_internal (size_t size, uint32_t cp, uint32_t aclass)
 		assert (block->asize % 16 == 0);
 
 		if (block->cp == 0 && block->asize >= asize) {
-			if (check_free) {
-				sblock_free_check (block, bptr);
-			}
+			sblock_free_check (block);
 
 			if (block->asize > sizeof(struct block_control) + asize) {
 				// Отделяем для выделения блок с конца!
@@ -460,12 +441,9 @@ void *salloc_internal (size_t size, uint32_t cp, uint32_t aclass)
 
 			assert (size <= block->asize);
 			block->size = size;
-
 			block->aclass = aclass;
 
-			if (check_tail) {
-				sblock_tail_init (block, bptr);
-			}
+			sblock_tail_init (block);
 
 			// Зарегистрировать точку вызова среди call_points
 			int cp_idx = cpmgr::scallpointalloc(block);
@@ -478,7 +456,7 @@ void *salloc_internal (size_t size, uint32_t cp, uint32_t aclass)
 				memory_max_used = memory_used;
 			}
 
-			return bptr + sizeof(struct block_control);
+			return block->ptr;
 		}
 
 		bptr += sizeof(struct block_control) + block->asize;
@@ -518,22 +496,13 @@ void sfree_internal (void *ptr, uint32_t cp, uint32_t aclass)
 		printf ("\t*** block allocated over '%s' from %s, free over '%s' from %s\n",
 			allocf[block->aclass], getCallPonitName(block->cp, aname, 80),
 			freef[aclass], getCallPonitName(cp, fname, 80));
-
-		assert(block->aclass != aclass);
-		return;
+		assert(false);
 	}
 
 	cpmgr::scallpointfree(block, cp);
-
-	if (check_tail) {
-		sblock_tail_check (block, bptr);
-	}
-
+	sblock_tail_check (block);
 	block->cp = 0;
-
-	if (check_free) {
-		sblock_free_init (block, bptr);
-	}
+	sblock_free_init (block);
 
 	assert (memory_used >= block->size);
 	// статистика.
