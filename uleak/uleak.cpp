@@ -18,6 +18,16 @@
 
 using namespace std;
 
+// TODO: для 64-х бит необходимо точки хранить наверное в виде указателя.
+// HINT: А можно в заголовке блока cp вообще не хранить, а хранить только
+//	индекс в таблице точек вызова. И для пустых блоков тоже его сохранять.
+//	Это освободит одно поле и унифицирует заголовок блока.
+//	Собственно индекс у нас - 12 бит, признак занятости блока - это один бит.
+//	Туда же можно будет впихнуть класс операции,
+// HINT: Класс операции можно хранить в описании точки вызова. Он не меняется в
+//	процессе работы. Хотя если я буду подниматься по иерархии - это может
+//	быть несправедливо.
+
 namespace {
 
 // Частота вызова переодических операций.
@@ -107,7 +117,7 @@ bool isFunction (void *func, uint32_t cp, size_t fsz)
 const char *getCallPonitName(uint32_t cp, char *buf = 0, size_t size = 0)
 {
 	assert ((buf != 0 && size != 0) || (buf == 0 && size == 0));
-	
+
 	static char sym[80];
 	char *symbuf = (buf != 0) ? buf : sym;
 	size_t ss = (buf != 0) ? size : 80;
@@ -657,14 +667,14 @@ uint32_t getCallPoint()
 // 	while (unw_step(&cursor) > 0) {
 // 		char sym[80];
 // 		unw_get_proc_name(&cursor, sym, 80, 0);
-// 
+//
 // 		// Что-то это далеко не полный список...
 // 		if (	strncmp(sym, "_ZNS", 4) == 0 ||		// std::
 // 			strncmp(sym, "_ZN5boost", 9) == 0)	// boost::
 // 		{
 // 			continue;
 // 		}
-// 
+//
 // 		// В случае переполнения счетчика точки -
 // 		// переходим на верхний уровень.
 // 		unw_word_t ip;
@@ -673,9 +683,7 @@ uint32_t getCallPoint()
 // 			return ip;
 // 	}
 #else
-	// TODO: Здесь переписать на __builtin_return_address
-	const uint32_t *sptr = reinterpret_cast<const uint32_t *>(stack);
-	return sptr[-1];
+	return reinterpret_cast<uint32_t>(getReturnAddress(1));
 #endif
 }
 

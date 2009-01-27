@@ -13,16 +13,14 @@ VERSION=${VERSION_RELEASE}.${VERSION_BETA}.${VERSION_ALPHA}
 
 WFLAGS=-Wall -Wextra -Weffc++
 OFLAGS=-O0 -ggdb3
-CFLAGS=
+# поддержки 64-х бит пока нету...
+CFLAGS=-m32
 LDFLAGS=-lc -lstdc++
 
-ifneq ("${wildcard /usr/lib/libunwind*}x", "x")
+ifneq ("${wildcard /usr/lib/libunwind-x86.*}x", "x")
 	CFLAGS+=-DLIBUNWIND
 	LDFLAGS+=-lunwind -lunwind-generic
-else
-	error Missing libunwind dependences
 endif
-
 
 all: libuleak.a libuleak.so.${VERSION}
 
@@ -31,7 +29,7 @@ libuleak.a: uleak.o
 	ranlib $@
 
 libuleak.so.${VERSION} : uleak.o
-	gcc -shared -Wl,-soname,libuleak.so.${VERSION_RELEASE} -o $@ $< ${LDFLAGS}
+	gcc -shared -Wl,-soname,libuleak.so.${VERSION_RELEASE} ${CFLAGS} -o $@ $< ${LDFLAGS}
 
 uleak.o: uleak.cpp
 	g++ ${WFLAGS} ${OFLAGS} ${CFLAGS} -fPIC -c -o $@ $<
