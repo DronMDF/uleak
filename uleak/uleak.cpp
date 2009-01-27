@@ -52,11 +52,11 @@ const uint32_t tail_zone = check_tail ? 32 : 0;
 // Фильтровать стандартные функции из CallPoint's
 const bool function_filter = false;
 
-// 16 мегабайт - размер хипа. его должно хватать.
+// размер хипа.
 const uint32_t heap_size = 64 * 1024 * 1024;
 
 // количество точек вызова. Их должно хватать. если не хватает будет assert.
-const uint32_t call_points = 8192;
+const int call_points = 8192;
 BOOST_STATIC_ASSERT(call_points <= (1 << 16));
 
 // Допустимое количество блоков на точку. во избежание лишней ругани.
@@ -94,17 +94,9 @@ struct block_control {
 // Потом сокращу до 16
 BOOST_STATIC_ASSERT(sizeof(struct block_control) == 32);
 
-struct callpoint {
-	uint32_t cp;
-	uint32_t current_blocks;
-	uint32_t max_blocks;
-	uint32_t size;
-};
-
 bool isActive = false;
 
 uint8_t sheap[heap_size];
-struct callpoint scps[call_points];
 
 // -----------------------------------------------------------------------------
 // Фильтрация стандартный функций из стека вызова.
@@ -162,44 +154,66 @@ const char *getCallPonitName(uint32_t cp, char *buf = 0, size_t size = 0)
 
 // -----------------------------------------------------------------------------
 // менеджер точек вызова
+namespace cpmgr {
 
-bool scallpointalloc(struct block_control *block)
+struct callpoint_stat {
+	uint32_t cp;
+	uint32_t current_blocks;
+	uint32_t max_blocks;
+	uint32_t size;
+};
+
+struct callpoint_stat cparray[call_points];
+
+void init()
 {
-	for (uint32_t i = 0; i < call_points; i++) {
-		if (scps[i].cp == block->cp || scps[i].cp == 0) {
-			scps[i].current_blocks++;
-			scps[i].cp = block->cp;
+	for (int i = 0; i < call_points; i++) {
+		cparray[i].cp = 0;
+		cparray[i].size = 0;
+		cparray[i].current_blocks = 0;
+		cparray[i].max_blocks = block_limit;
+	}
+}
 
-			if (scps[i].current_blocks > scps[i].max_blocks) {
-				scps[i].max_blocks = scps[i].current_blocks;
+int scallpointalloc(const struct block_control *block)
+{
+	for (int i = 0; i < call_points; i++) {
+		if (cparray[i].cp == block->cp || cparray[i].cp == 0) {
+			cparray[i].current_blocks++;
+			cparray[i].cp = block->cp;
+
+			if (cparray[i].current_blocks > cparray[i].max_blocks) {
+				cparray[i].max_blocks = cparray[i].current_blocks;
 
 				printf ("\t*** leak %u from %s with %ssize %u\n",
-					scps[i].max_blocks, getCallPonitName(scps[i].cp),
-					scps[i].size == block->size ? "" : "variable ", block->size);
+					cparray[i].max_blocks, getCallPonitName(cparray[i].cp),
+					cparray[i].size == block->size ? "" : "variable ", block->size);
 			}
 
-			scps[i].size = block->size;
-			block->cp_idx = i;
-			return true;
+			cparray[i].size = block->size;
+			return i;
 		}
 	}
 
-	return false;
+	return -1;
 }
 
 void scallpointfree(const struct block_control *block, uint32_t cp)
 {
 	const int i = block->cp_idx;
-	assert(scps[i].cp == block->cp);
+	assert(i >= 0 && i < call_points);
+	assert(cparray[i].cp == block->cp);
 
-	if (scps[i].current_blocks == 0) {
+	if (cparray[i].current_blocks == 0) {
 		char aname[80], fname[80];
 		printf ("\t*** extra free for block size %u allocated from %s, free from %s\n",
-			block->size, getCallPonitName(scps[i].cp, aname, 80), getCallPonitName(cp, fname, 80));
+			block->size, getCallPonitName(cparray[i].cp, aname, 80), getCallPonitName(cp, fname, 80));
 	} else {
-		scps[i].current_blocks--;
+		cparray[i].current_blocks--;
 	}
 }
+
+} // namespace cpmgr
 
 // -----------------------------------------------------------------------------
 // Проверка переполнений блока
@@ -305,12 +319,7 @@ void sinit()
 		sblock_free_init(block, sheap);
 	}
 
-	for (uint32_t i = 0; i < call_points; i++) {
-		scps[i].cp = 0;
-		scps[i].size = 0;
-		scps[i].current_blocks = 0;
-		scps[i].max_blocks = block_limit;
-	}
+	cpmgr::init();
 
 	// Для корректного вывода.
 	setvbuf(stdout, NULL, _IONBF, 0);
@@ -459,7 +468,9 @@ void *salloc_internal (size_t size, uint32_t cp, uint32_t aclass)
 			}
 
 			// Зарегистрировать точку вызова среди call_points
-			assert (scallpointalloc (block));
+			int cp_idx = cpmgr::scallpointalloc(block);
+			assert (cp_idx >= 0 && cp_idx < call_points);
+			block->cp_idx = cp_idx;
 
 			// Собрать статистику.
 			memory_used += block->size;
@@ -512,7 +523,7 @@ void sfree_internal (void *ptr, uint32_t cp, uint32_t aclass)
 		return;
 	}
 
-	scallpointfree (block, cp);
+	cpmgr::scallpointfree(block, cp);
 
 	if (check_tail) {
 		sblock_tail_check (block, bptr);
