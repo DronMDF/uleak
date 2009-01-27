@@ -87,14 +87,12 @@ struct block_control {
 	uint8_t used;
 
 	uint32_t cp;
-	uint32_t oldcp;
-	uint32_t reserved[3];
 
 	uint8_t ptr[0];
 } __attribute__((packed));
 
 // Потом сокращу до 16
-BOOST_STATIC_ASSERT(sizeof(struct block_control) == 32);
+BOOST_STATIC_ASSERT(sizeof(struct block_control) == 16);
 
 bool isActive = false;
 
@@ -197,6 +195,7 @@ int scallpointalloc(const struct block_control *block)
 		}
 	}
 
+	assert(!"Not avail call point");
 	return -1;
 }
 
@@ -213,6 +212,12 @@ void scallpointfree(const struct block_control *block, uint32_t cp)
 	} else {
 		cparray[i].current_blocks--;
 	}
+}
+
+uint32_t getCallPoint(int idx)
+{
+	assert (idx >= 0 && idx < call_points);
+	return cparray[idx].cp;
 }
 
 } // namespace cpmgr
@@ -263,7 +268,7 @@ void sblock_tail_check_all ()
 void sblock_free_init (struct block_control *block)
 {
 	if (!check_free) return;
-	if (block->oldcp == 0) return;
+	// TODO: исключить никогда неиспользуемые блоки.
 
 	// Замусорим блок специально.
 	memset (block->ptr, FFILL, block->asize);
@@ -272,12 +277,12 @@ void sblock_free_init (struct block_control *block)
 void sblock_free_check (const struct block_control *block)
 {
 	if (!check_free) return;
-	if (block->oldcp == 0) return;
+	// TODO: исключить никогда неиспользуемые блоки.
 
 	for (uint32_t i = 0; i < block->asize; i++) {
 		if (block->ptr[i] != FFILL) {
 			printf ("\t*** modifyed free block %p, allocated from %s with size %u\n",
-				block->ptr, getCallPonitName(block->oldcp), block->size);
+				block->ptr, getCallPonitName(cpmgr::getCallPoint(block->cp_idx)), block->size);
 			assert(!"Corrupted free block");
 		}
 	}
@@ -307,7 +312,6 @@ void sinit()
 {
 	struct block_control *block = reinterpret_cast<struct block_control *>(sheap);
 	block->cp = 0;
-	block->oldcp = 0;
 	block->asize = block->size = heap_size - sizeof(struct block_control);
 	assert (block->asize % 16 == 0);
 
@@ -379,7 +383,7 @@ void *alloc (size_t size, uint32_t cp, uint32_t aclass)
 				block->asize = block->size = asize;
 			}
 
-			block->oldcp = block->cp = cp;
+			block->cp = cp;
 
 			assert (size <= block->asize);
 			block->size = size;
@@ -387,10 +391,7 @@ void *alloc (size_t size, uint32_t cp, uint32_t aclass)
 
 			sblock_tail_init (block);
 
-			// Зарегистрировать точку вызова среди call_points
-			int cp_idx = cpmgr::scallpointalloc(block);
-			assert (cp_idx >= 0 && cp_idx < call_points);
-			block->cp_idx = cp_idx;
+			block->cp_idx = cpmgr::scallpointalloc(block);
 
 			// Собрать статистику.
 			memory_used += block->size;
@@ -472,7 +473,6 @@ void defrag ()
 
 				sblock_free_check (nblock);
 
-				block->oldcp = 0;	// Мы его уже проверили.
 				block->asize += sizeof(struct block_control) + nblock->asize;
 				block->size = block->asize;
 			}
