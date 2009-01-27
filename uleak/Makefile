@@ -12,7 +12,7 @@ VERSION_PATCH = 0
 VERSION=${VERSION_RELEASE}.${VERSION_BETA}.${VERSION_ALPHA}
 
 WFLAGS=-Wall -Wextra -Weffc++
-OFLAGS=-O0 -ggdb3
+OFLAGS=-O2 -ggdb3
 # поддержки 64-х бит пока нету...
 CFLAGS=-m32
 LDFLAGS=-lc -lstdc++

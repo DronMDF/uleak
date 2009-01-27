@@ -20,7 +20,6 @@
 
 using namespace std;
 
-// TODO: убрать block->cp
 // TODO: тип cp должен быть указателем (const void *)
 // TODO: Для ускорения работы менеджера необходимо ввести очереди блоков. Только
 //	вместо ссылок в них можно хранить смещения относительно sheap. Это будет
@@ -38,6 +37,7 @@ const bool free_zero = false;
 
 // Заполнение освобождаемых блоков и контроль использования после освобождения (может производиться с большо-о-ой задержкой)
 const bool check_free = false;
+const uint32_t check_free_limit = 1024;	// Максимально проверяемый размер блока
 const bool check_free_repetition = false;
 
 // Контролировать пространство за пределами блока
@@ -80,12 +80,17 @@ struct block_control {
 	uint32_t size;
 	uint16_t cp_idx;
 	uint8_t aclass;	// класс операций памяти
-	uint8_t used;
+	uint8_t flags;
 
-	uint32_t cp;
+	uint32_t cp __attribute__((deprecated));
 
 	uint8_t ptr[0];
 } __attribute__((packed));
+
+enum {
+	BF_USED = 0x0001,
+	
+};
 
 // Потом сокращу до 16
 BOOST_STATIC_ASSERT(sizeof(struct block_control) == 16);
@@ -169,12 +174,12 @@ void init()
 	}
 }
 
-int scallpointalloc(const struct block_control *block)
+int scallpointalloc(const struct block_control *block, uint32_t cp)
 {
 	for (int i = 0; i < call_points; i++) {
-		if (cparray[i].cp == block->cp || cparray[i].cp == 0) {
+		if (cparray[i].cp == cp || cparray[i].cp == 0) {
 			cparray[i].current_blocks++;
-			cparray[i].cp = block->cp;
+			cparray[i].cp = cp;
 
 			if (cparray[i].current_blocks > cparray[i].max_blocks) {
 				cparray[i].max_blocks = cparray[i].current_blocks;
@@ -197,7 +202,6 @@ void scallpointfree(const struct block_control *block, uint32_t cp)
 {
 	const int i = block->cp_idx;
 	assert(i >= 0 && i < call_points);
-	assert(cparray[i].cp == block->cp);
 
 	if (cparray[i].current_blocks == 0) {
 		char aname[80], fname[80];
@@ -232,7 +236,7 @@ void sblock_tail_check (const struct block_control *block)
 	for (int i = block->asize - block->size - 1; i >= 0; i--) {
 		if (block->ptr[block->size + i] != AFILL) {
 			printf ("\t*** corrupted block tail, %u bytes, allocated from %s, size %u\n",
-				i, getCallPonitName(block->cp), block->size);
+				i, getCallPonitName(cpmgr::getCallPoint(block->cp_idx)), block->size);
 			assert(!"Corrupted block tail");
 		}
 	}
@@ -247,7 +251,7 @@ void sblock_tail_check_all ()
 		struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
 		assert (block->asize % 16 == 0);
 
-		if (block->cp != 0) {
+		if ((block->flags & BF_USED) != 0) {
 			sblock_tail_check (block);
 		}
 
@@ -262,7 +266,7 @@ void sblock_tail_check_all ()
 void sblock_free_init (struct block_control *block)
 {
 	if (!check_free) return;
-	// TODO: исключить никогда неиспользуемые блоки.
+	if (block->asize > check_free_limit) return;
 
 	// Замусорим блок специально.
 	memset (block->ptr, FFILL, block->asize);
@@ -271,7 +275,7 @@ void sblock_free_init (struct block_control *block)
 void sblock_free_check (const struct block_control *block)
 {
 	if (!check_free) return;
-	// TODO: исключить никогда неиспользуемые блоки.
+	if (block->asize > check_free_limit) return;
 
 	for (uint32_t i = 0; i < block->asize; i++) {
 		if (block->ptr[i] != FFILL) {
@@ -290,7 +294,7 @@ void sblock_free_check_all ()
 		struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
 		assert (block->asize % 16 == 0);
 
-		if (block->cp == 0) {
+		if ((block->flags & BF_USED) == 0) {
 			sblock_free_check (block);
 		}
 
@@ -305,8 +309,8 @@ void sblock_free_check_all ()
 void sinit()
 {
 	struct block_control *block = reinterpret_cast<struct block_control *>(sheap);
-	block->cp = 0;
 	block->asize = block->size = heap_size - sizeof(struct block_control);
+	block->flags = 0;
 	assert (block->asize % 16 == 0);
 
 	sblock_free_init(block);
@@ -357,7 +361,7 @@ void *alloc (size_t size, uint32_t cp, uint32_t aclass)
 		struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
 		assert (block->asize % 16 == 0);
 
-		if (block->cp == 0 && block->asize >= asize) {
+		if ((block->flags & BF_USED) == 0 && block->asize >= asize) {
 			sblock_free_check (block);
 
 			if (block->asize > sizeof(struct block_control) + asize) {
@@ -373,7 +377,7 @@ void *alloc (size_t size, uint32_t cp, uint32_t aclass)
 				block->asize = block->size = asize;
 			}
 
-			block->cp = cp;
+			block->flags |= BF_USED;
 
 			assert (size <= block->asize);
 			block->size = size;
@@ -381,7 +385,7 @@ void *alloc (size_t size, uint32_t cp, uint32_t aclass)
 
 			sblock_tail_init (block);
 
-			block->cp_idx = cpmgr::scallpointalloc(block);
+			block->cp_idx = cpmgr::scallpointalloc(block, cp);
 
 			// Собрать статистику.
 			memory_used += block->size;
@@ -411,7 +415,7 @@ void free (void *ptr, uint32_t cp, uint32_t aclass)
 	uint8_t *bptr = reinterpret_cast<uint8_t *>(ptr) - sizeof (struct block_control);
 	struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
 
-	if (block->cp == 0 || block->cp == FFILL32) {
+	if ((block->flags & BF_USED) == 0 || block->flags == FFILL) {
 		// Блок уже освобожден.
 		printf ("\t*** double free block %p from %s\n", ptr, getCallPonitName(cp));
 		return;
@@ -427,14 +431,14 @@ void free (void *ptr, uint32_t cp, uint32_t aclass)
 		//  Нарушение класса функций
 		char aname[80], fname[80];
 		printf ("\t*** block allocated over '%s' from %s, free over '%s' from %s\n",
-			allocf[block->aclass], getCallPonitName(block->cp, aname, 80),
+			allocf[block->aclass], getCallPonitName(cpmgr::getCallPoint(block->cp_idx), aname, 80),
 			freef[aclass], getCallPonitName(cp, fname, 80));
 		assert(!"Mismatch function class");
 	}
 
 	cpmgr::scallpointfree(block, cp);
 	sblock_tail_check (block);
-	block->cp = 0;
+	block->flags = 0;
 	sblock_free_init (block);
 
 	assert (memory_used >= block->size);
@@ -450,7 +454,7 @@ void defrag ()
 		struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
 		assert (block->asize % 16 == 0);
 
-		if (block->cp == 0) {
+		if ((block->flags & BF_USED) == 0) {
 			sblock_free_check(block);
 
 			while (true) {
@@ -459,7 +463,7 @@ void defrag ()
 
 				struct block_control *nblock = reinterpret_cast<struct block_control *>(nbptr);
 				assert (nblock->asize % 16 == 0);
-				if (nblock->cp != 0) break;
+				if ((nblock->flags & BF_USED) != 0) break;
 
 				sblock_free_check (nblock);
 
@@ -545,7 +549,6 @@ uint32_t blocksize(void *ptr)
 
 	uint8_t *bptr = reinterpret_cast<uint8_t *>(ptr) - sizeof(struct block_control);
 	struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
-	assert(block->cp != 0);
 	return block->size;
 }
 
