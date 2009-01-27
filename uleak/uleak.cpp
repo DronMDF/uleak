@@ -234,7 +234,7 @@ void sblock_tail_check (const struct block_control *block)
 		if (block->ptr[block->size + i] != AFILL) {
 			printf ("\t*** corrupted block tail, %u bytes, allocated from %s, size %u\n",
 				i, getCallPonitName(block->cp), block->size);
-			assert (false);
+			assert(!"Corrupted block tail");
 		}
 	}
 
@@ -278,7 +278,7 @@ void sblock_free_check (const struct block_control *block)
 		if (block->ptr[i] != FFILL) {
 			printf ("\t*** modifyed free block %p, allocated from %s with size %u\n",
 				block->ptr, getCallPonitName(block->oldcp), block->size);
-			assert(false);
+			assert(!"Corrupted free block");
 		}
 	}
 }
@@ -343,75 +343,17 @@ void speriodic()
 // -----------------------------------------------------------------------------
 // Дефрагментация хипа.
 
-void sdefrag ()
-{
-	uint32_t maxfree = 0;
-
-	for (uint8_t *bptr = sheap; bptr < sheap + heap_size; ) {
-		struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
-		assert (block->asize % 16 == 0);
-
-		if (block->cp == 0) {
-			sblock_free_check(block);
-
-			while (true) {
-				uint8_t *nbptr = block->ptr + block->asize;
-				if (nbptr >= sheap + heap_size) break;
-
-				struct block_control *nblock = reinterpret_cast<struct block_control *>(nbptr);
-				assert (nblock->asize % 16 == 0);
-				if (nblock->cp != 0) break;
-
-				sblock_free_check (nblock);
-
-				block->oldcp = 0;	// Мы его уже проверили.
-				block->asize += sizeof(struct block_control) + nblock->asize;
-				block->size = block->asize;
-			}
-
-			sblock_free_init(block);
-
-			if (block->asize > maxfree) {
-				maxfree = block->asize;
-			}
-		}
-
-		// Накладные расходы складываются из заголовков блоков.
-		bptr += sizeof(struct block_control) + block->asize;
-		assert (bptr <= sheap + heap_size);
-	}
-
-	printf ("\t*** defrag. max free block - %u\n", maxfree);
-	speriodic();
-}
-
 // -----------------------------------------------------------------------------
-class slock {
-private:
-	enum lock_state { UNLOCKED, LOCKED };
-
-	static volatile lock_state m_lock;
-
-public:
-	slock() {
-		while (__sync_lock_test_and_set(&m_lock, LOCKED) == LOCKED) { };
-	}
-
-	~slock() {
-		__sync_lock_release(&m_lock);
-	}
-};
-
-volatile slock::lock_state slock::m_lock = UNLOCKED;
-
 // -----------------------------------------------------------------------------
 // Очень простая реализация менеджера памяти
+
+namespace heapmgr {
 
 // TODO: Для ускорения работы менеджера необходимо ввести очереди блоков. Только
 //	вместо ссылок в них можно хранить смещения относительно sheap. Это будет
 //	удобнее в плане переносимости.
 
-void *salloc_internal (size_t size, uint32_t cp, uint32_t aclass)
+void *alloc (size_t size, uint32_t cp, uint32_t aclass)
 {
 	const uint32_t asize = (size + tail_zone + 15) & ~15;
 
@@ -465,7 +407,7 @@ void *salloc_internal (size_t size, uint32_t cp, uint32_t aclass)
 	return 0;
 }
 
-void sfree_internal (void *ptr, uint32_t cp, uint32_t aclass)
+void free (void *ptr, uint32_t cp, uint32_t aclass)
 {
 	if (ptr < sheap || ptr >= sheap + heap_size) {
 		if (ptr != 0 || free_zero) {
@@ -496,7 +438,7 @@ void sfree_internal (void *ptr, uint32_t cp, uint32_t aclass)
 		printf ("\t*** block allocated over '%s' from %s, free over '%s' from %s\n",
 			allocf[block->aclass], getCallPonitName(block->cp, aname, 80),
 			freef[aclass], getCallPonitName(cp, fname, 80));
-		assert(false);
+		assert(!"Mismatch function class");
 	}
 
 	cpmgr::scallpointfree(block, cp);
@@ -509,75 +451,139 @@ void sfree_internal (void *ptr, uint32_t cp, uint32_t aclass)
 	memory_used -= block->size;
 }
 
+void defrag ()
+{
+	uint32_t maxfree = 0;
+
+	for (uint8_t *bptr = sheap; bptr < sheap + heap_size; ) {
+		struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
+		assert (block->asize % 16 == 0);
+
+		if (block->cp == 0) {
+			sblock_free_check(block);
+
+			while (true) {
+				uint8_t *nbptr = block->ptr + block->asize;
+				if (nbptr >= sheap + heap_size) break;
+
+				struct block_control *nblock = reinterpret_cast<struct block_control *>(nbptr);
+				assert (nblock->asize % 16 == 0);
+				if (nblock->cp != 0) break;
+
+				sblock_free_check (nblock);
+
+				block->oldcp = 0;	// Мы его уже проверили.
+				block->asize += sizeof(struct block_control) + nblock->asize;
+				block->size = block->asize;
+			}
+
+			sblock_free_init(block);
+
+			if (block->asize > maxfree) {
+				maxfree = block->asize;
+			}
+		}
+
+		// Накладные расходы складываются из заголовков блоков.
+		bptr += sizeof(struct block_control) + block->asize;
+		assert (bptr <= sheap + heap_size);
+	}
+
+	printf ("\t*** defrag. max free block - %u\n", maxfree);
+	speriodic();
+}
+
+} // namespace heapmgr
+
 // -----------------------------------------------------------------------------
 // Интерфейсные функции обеспечивают блокировки и всякую фигню.
-void *salloc (size_t size, uint32_t cp, uint32_t aclass)
+namespace heapif {
+
+class lock_t {
+private:
+	enum lock_state { UNLOCKED, LOCKED };
+
+	static volatile lock_state m_lock;
+
+public:
+	lock_t() {
+		while (__sync_lock_test_and_set(&m_lock, LOCKED) == LOCKED) { };
+	}
+
+	~lock_t() {
+		__sync_lock_release(&m_lock);
+	}
+};
+
+volatile lock_t::lock_state lock_t::m_lock = UNLOCKED;
+
+void *alloc (size_t size, uint32_t cp, uint32_t aclass)
 {
 	assert (size < heap_size);
 	if (!isActive) sinit();
-	slock lock;
+	lock_t lock;
 	speriodic();
 
-	void *ptr = salloc_internal (size, cp, aclass);
+	void *ptr = heapmgr::alloc(size, cp, aclass);
 	if (ptr == 0) {
 		// Дефрагментировать и попытаться снова.
-		sdefrag ();
-		ptr = salloc_internal (size, cp, aclass);
+		heapmgr::defrag();
+		ptr = heapmgr::alloc(size, cp, aclass);
 
 		if (ptr == 0) {
-			printf ("\t*** No memory for alloc(%u), called from %s\n", size, getCallPonitName(cp));
+			printf("\t*** No memory for alloc(%u), called from %s\n", size, getCallPonitName(cp));
+			assert(!"No memory");
 		}
-
-		assert (ptr != 0);
 	}
 
 	assert ((uint32_t)ptr % 16 == 0);
 	return ptr;
 }
 
-void sfree (void *ptr, uint32_t cp, uint32_t aclass)
+void free (void *ptr, uint32_t cp, uint32_t aclass)
 {
-	assert (isActive);
-	slock lock;
+	assert(isActive);
+	lock_t lock;
 	speriodic();
-	sfree_internal(ptr, cp, aclass);
+	heapmgr::free(ptr, cp, aclass);
 }
 
-uint32_t sblocksize(void *ptr)
+uint32_t blocksize(void *ptr)
 {
-	assert (isActive);
-	slock lock;
+	assert(isActive);
+	lock_t lock;
 
 	uint8_t *bptr = reinterpret_cast<uint8_t *>(ptr) - sizeof(struct block_control);
 	struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
-	assert (block->cp != 0);
+	assert(block->cp != 0);
 	return block->size;
 }
 
-uint32_t sblockcount(uint32_t cp)
+uint32_t blockcount(uint32_t cp)
 {
 	if (!isActive) sinit();
-
-	slock lock;
+	lock_t lock;
 
 	// TODO: определить количество блоков в этой точке вызова.
 	return 0;
 }
 
 // Неблокируемая функция, но ей необходимо знать размер блока.
-void *srealloc (void *ptr, size_t size, uint32_t cp, uint32_t aclass)
+void *realloc (void *ptr, size_t size, uint32_t cp, uint32_t aclass)
 {
-	void *nptr = salloc (size, cp, aclass);
+	void *nptr = alloc(size, cp, aclass);
 
 	if (nptr == 0) return 0;
 
 	if (ptr != 0) {
-		memcpy (nptr, ptr, min(size, sblocksize(ptr)));
+		memcpy(nptr, ptr, min(size, blocksize(ptr)));
 	}
 
-	sfree (ptr, cp, aclass);
+	free (ptr, cp, aclass);
 	return nptr;
 }
+
+} // namespace heapif
 
 // -----------------------------------------------------------------------------
 // Определение точек вызова
@@ -664,16 +670,16 @@ extern "C"
 void *malloc (size_t size)
 {
 	const uint32_t cp = getCallPoint();
-	return salloc (size, cp, CLASS_C);
+	return heapif::alloc(size, cp, CLASS_C);
 }
 
 extern "C"
 void *calloc (size_t number, size_t size)
 {
 	const uint32_t cp = getCallPoint();
-	void *ptr = salloc (number * size, cp, CLASS_C);
+	void *ptr = heapif::alloc(number * size, cp, CLASS_C);
 	// calloc возвращает чищенную память!
-	memset (ptr, 0, number * size);
+	memset(ptr, 0, number * size);
 	return ptr;
 }
 
@@ -681,7 +687,7 @@ extern "C"
 void *realloc (void *ptr, size_t size)
 {
 	const uint32_t cp = getCallPoint();
-	return srealloc(ptr, size, cp, CLASS_C);
+	return heapif::realloc(ptr, size, cp, CLASS_C);
 }
 
 extern "C"
@@ -689,9 +695,10 @@ void *reallocf (void *ptr, size_t size)
 {
 	const uint32_t cp = getCallPoint();
 
-	void *nptr = srealloc(ptr, size, cp, CLASS_C);
-	if (nptr == 0 && ptr != 0)
-		sfree (ptr, cp, CLASS_C);
+	void *nptr = heapif::realloc(ptr, size, cp, CLASS_C);
+	if (nptr == 0 && ptr != 0) {
+		heapif::free(ptr, cp, CLASS_C);
+	}
 
 	return nptr;
 }
@@ -700,7 +707,7 @@ extern "C"
 void free (void *ptr)
 {
 	const uint32_t cp = getCallPoint();
-	sfree (ptr, cp, CLASS_C);
+	heapif::free (ptr, cp, CLASS_C);
 }
 
 extern "C"
@@ -708,7 +715,7 @@ char *strdup(const char *str)
 {
 	const uint32_t cp = getCallPoint();
 
-	char *str2 = reinterpret_cast<char *>(salloc(strlen(str) + 1, cp, CLASS_C));
+	char *str2 = reinterpret_cast<char *>(heapif::alloc(strlen(str) + 1, cp, CLASS_C));
 	strcpy (str2, str);
 	return str2;
 }
@@ -717,23 +724,23 @@ char *strdup(const char *str)
 void *operator new(size_t size)
 {
 	const uint32_t cp = getCallPoint();
-	return salloc (size, cp, CLASS_NEW);
+	return heapif::alloc(size, cp, CLASS_NEW);
 }
 
 void operator delete (void *ptr) throw()
 {
 	const uint32_t cp = getCallPoint();
-	sfree (ptr, cp, CLASS_NEW);
+	heapif::free(ptr, cp, CLASS_NEW);
 }
 
 void *operator new[] (unsigned int size)
 {
 	const uint32_t cp = getCallPoint();
-	return salloc (size, cp, CLASS_NEW_ARRAY);
+	return heapif::alloc (size, cp, CLASS_NEW_ARRAY);
 }
 
 void operator delete[] (void *ptr) throw()
 {
 	const uint32_t cp = getCallPoint();
-	sfree (ptr, cp, CLASS_NEW_ARRAY);
+	heapif::free(ptr, cp, CLASS_NEW_ARRAY);
 }
