@@ -20,7 +20,6 @@
 
 using namespace std;
 
-// TODO: тип cp должен быть указателем (const void *)
 // TODO: Для ускорения работы менеджера необходимо ввести очереди блоков. Только
 //	вместо ссылок в них можно хранить смещения относительно sheap. Это будет
 //	удобнее в плане переносимости.
@@ -101,17 +100,14 @@ typedef const void *callpoint_t;
 
 // -----------------------------------------------------------------------------
 
-const char *getCallPonitName(callpoint_t cp, char *buf = 0, size_t size = 0)
+const char *getCallPonitName(callpoint_t cp, char *buf, size_t bufsz)
 {
-	assert ((buf != 0 && size != 0) || (buf == 0 && size == 0));
+	assert (buf != 0 && bufsz != 0);
 
-	static char sym[80];
-	char *symbuf = (buf != 0) ? buf : sym;
-	size_t ss = (buf != 0) ? size : 80;
-
+	memset(buf, 0, bufsz);	// Паранойя?
 #ifdef LIBUNWIND
 	// libunwind несколько ограничен в этом плане тем, что может показывать
-	// символы толоько по курсору, который образуется только при обработке
+	// символы только по курсору, который образуется только при обработке
 	// стека вызовов... возможны ситуации, когда адрес выделения не будет
 	// отображаться как имя.
 	unw_context_t uc;
@@ -129,31 +125,31 @@ const char *getCallPonitName(callpoint_t cp, char *buf = 0, size_t size = 0)
 		const unw_word_t cpr = reinterpret_cast<unw_word_t>(cp);
 
 		if (cpr >= info.start_ip && cpr < info.end_ip) {
-			int rv = unw_get_proc_name (&cursor, symbuf, ss, 0);
-			if (rv == UNW_EUNSPEC || rv == UNW_ENOINFO || strlen(symbuf) == 0) {
+			int rv = unw_get_proc_name (&cursor, buf, bufsz, 0);
+			if (rv == UNW_EUNSPEC || rv == UNW_ENOINFO || strlen(buf) == 0) {
 				// Имя процедуры не обнаруживается.
-				snprintf (symbuf, ss, "%p", reinterpret_cast<callpoint_t>(info.start_ip));
+				snprintf (buf, bufsz, "%p", reinterpret_cast<callpoint_t>(info.start_ip));
 			}
 
 			if (cpr - info.start_ip > 0) {
 				char off[12];
-				snprintf (off, 12, "+0x%lx", cpr - info.start_ip);
+				snprintf (off, 12, "+0x%lx", (unsigned long)(cpr - info.start_ip));
 
-				if (strlen(symbuf) + strlen(off) + 4 > ss) {
-					strcpy(symbuf + ss - strlen(off) - 4, "...");
+				if (strlen(buf) + strlen(off) + 4 > bufsz) {
+					strcpy(buf + bufsz - strlen(off) - 4, "...");
 				}
 
-				strcat(symbuf, off);
+				strcat(buf, off);
 			}
 
-			return symbuf;
+			return buf;
 		}
 	}
 #endif
 
 	// Это как фоллбек даже для libunwind.
-	snprintf(symbuf, ss, "%p", cp);
-	return symbuf;
+	snprintf(buf, bufsz, "%p", cp);
+	return buf;
 }
 
 // -----------------------------------------------------------------------------
@@ -189,8 +185,9 @@ int scallpointalloc(const struct block_control *block, callpoint_t cp)
 			if (cparray[i].current_blocks > cparray[i].max_blocks) {
 				cparray[i].max_blocks = cparray[i].current_blocks;
 
+				char name[80];
 				printf ("\t*** leak %u from %s with %ssize %u\n",
-					cparray[i].max_blocks, getCallPonitName(cparray[i].cp),
+					cparray[i].max_blocks, getCallPonitName(cparray[i].cp, name, 80),
 					cparray[i].size == block->size ? "" : "variable ", block->size);
 			}
 
@@ -240,8 +237,9 @@ void sblock_tail_check (const struct block_control *block)
 
 	for (int i = block->asize - block->size - 1; i >= 0; i--) {
 		if (block->ptr[block->size + i] != AFILL) {
+			char name[80];
 			printf ("\t*** corrupted block tail, %u bytes, allocated from %s, size %u\n",
-				i, getCallPonitName(cpmgr::getCallPoint(block->cp_idx)), block->size);
+				i, getCallPonitName(cpmgr::getCallPoint(block->cp_idx), name, 80), block->size);
 			assert(!"Corrupted block tail");
 		}
 	}
@@ -284,8 +282,9 @@ void sblock_free_check (const struct block_control *block)
 
 	for (uint32_t i = 0; i < block->asize; i++) {
 		if (block->ptr[i] != FFILL) {
+			char name[80];
 			printf ("\t*** modifyed free block %p, allocated from %s with size %u\n",
-				block->ptr, getCallPonitName(cpmgr::getCallPoint(block->cp_idx)), block->size);
+				block->ptr, getCallPonitName(cpmgr::getCallPoint(block->cp_idx), name, 80), block->size);
 			assert(!"Corrupted free block");
 		}
 	}
@@ -407,7 +406,9 @@ void free (void *ptr, callpoint_t cp, uint32_t aclass)
 {
 	if (ptr < sheap || ptr >= sheap + heap_size) {
 		if (ptr != 0 || free_zero) {
-			printf ("\t*** free unknown block %p from %s\n", ptr, getCallPonitName(cp));
+			char name[80];
+			printf ("\t*** free unknown block %p from %s\n",
+				ptr, getCallPonitName(cp, name, 80));
 		}
 
 		return;
@@ -420,7 +421,9 @@ void free (void *ptr, callpoint_t cp, uint32_t aclass)
 		// Прогнать цепочку блоков, чтобы проверить корректность и актуальность этого.
 
 		// Блок уже освобожден.
-		printf ("\t*** double free block %p from %s\n", ptr, getCallPonitName(cp));
+		char name[80];
+		printf ("\t*** double free block %p from %s\n",
+			ptr, getCallPonitName(cp, name, 80));
 		return;
 	}
 
@@ -528,8 +531,9 @@ void *alloc (size_t size, callpoint_t cp, uint32_t aclass)
 		ptr = heapmgr::alloc(size, cp, aclass);
 
 		if (ptr == 0) {
+			char name[80];
 			printf("\t*** No memory for alloc(%u), called from %s\n",
-				uint32_t(size), getCallPonitName(cp));
+				uint32_t(size), getCallPonitName(cp, name, 80));
 			assert(!"No memory");
 		}
 	}
