@@ -310,6 +310,8 @@ void sblock_free_check_all ()
 // -----------------------------------------------------------------------------
 // Инициализация.
 
+static unsigned int statistic[33];
+
 void sinit()
 {
 	struct block_control *block = reinterpret_cast<struct block_control *>(sheap);
@@ -318,6 +320,10 @@ void sinit()
 	assert (block->asize % 16 == 0);
 
 	sblock_free_init(block);
+
+	// статистика
+	for (int i = 0; i < 33; i++)
+		statistic[i] = 0;
 
 	cpmgr::init();
 
@@ -342,6 +348,12 @@ void speriodic()
 	// Статистика использования памяти.
 	printf ("\t*** Heap used: %u, max: %u\n", memory_used, memory_max_used);
 
+	// статистика по размеру блоков
+	// Много мусорит, ну да не важно.
+	for (int i = 0; i < 33; i++) {
+		printf ("\t\tstatistic[%d] = %u\n", i, statistic[i]);
+	}
+
 	sblock_tail_check_all();
 	sblock_free_check_all();
 }
@@ -353,6 +365,10 @@ namespace heapmgr {
 
 void *alloc (size_t size, callpoint_t cp, uint32_t aclass)
 {
+	// Подсчет статистики
+	const int si = size / 16;
+	statistic[(si < 32) ? si : 32]++;
+
 	const uint32_t asize = (size + tail_zone + 15) & ~15;
 
 	for (uint8_t *bptr = sheap; bptr < sheap + heap_size; ) {
