@@ -129,7 +129,11 @@ const char *getCallPonitName(callpoint_t cp, char *buf = 0, size_t size = 0)
 		const unw_word_t cpr = reinterpret_cast<unw_word_t>(cp);
 
 		if (cpr >= info.start_ip && cpr < info.end_ip) {
-			unw_get_proc_name (&cursor, symbuf, ss, 0);
+			int rv = unw_get_proc_name (&cursor, symbuf, ss, 0);
+			if (rv == UNW_EUNSPEC || rv == UNW_ENOINFO || strlen(symbuf) == 0) {
+				// Имя процедуры не обнаруживается.
+				snprintf (symbuf, ss, "%p", reinterpret_cast<callpoint_t>(info.start_ip));
+			}
 
 			if (cpr - info.start_ip > 0) {
 				char off[12];
