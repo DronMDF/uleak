@@ -13,11 +13,10 @@ VERSION=${VERSION_RELEASE}.${VERSION_BETA}.${VERSION_ALPHA}
 
 WFLAGS=-Wall -Wextra -Weffc++
 OFLAGS=-O2 -ggdb3
-# поддержки 64-х бит пока нету...
-CFLAGS=-m32
+CFLAGS=
 LDFLAGS=-lc -lstdc++
 
-ifneq ("${wildcard /usr/lib/libunwind-x86.*}x", "x")
+ifneq ("${wildcard /usr/lib/libunwind*}x", "x")
 	CFLAGS+=-DLIBUNWIND
 	LDFLAGS+=-lunwind -lunwind-generic
 endif
@@ -29,7 +28,7 @@ libuleak.a: uleak.o
 	ranlib $@
 
 libuleak.so.${VERSION} : uleak.o
-	gcc -shared -Wl,-soname,libuleak.so.${VERSION_RELEASE} ${CFLAGS} -o $@ $< ${LDFLAGS}
+	gcc -shared -Wl,-soname,libuleak.so.${VERSION_RELEASE} -o $@ $< ${LDFLAGS}
 
 uleak.o: uleak.cpp
 	g++ ${WFLAGS} ${OFLAGS} ${CFLAGS} -fPIC -c -o $@ $<

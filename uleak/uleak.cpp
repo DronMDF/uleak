@@ -86,7 +86,7 @@ struct block_control {
 
 enum {
 	BF_USED = 0x0001,
-	
+
 };
 
 // Потом сокращу до 16
@@ -97,7 +97,7 @@ bool isActive = false;
 
 uint8_t sheap[heap_size];
 
-typedef uint32_t callpoint_t;
+typedef const void *callpoint_t;
 
 // -----------------------------------------------------------------------------
 
@@ -126,12 +126,14 @@ const char *getCallPonitName(callpoint_t cp, char *buf = 0, size_t size = 0)
 		if (info.start_ip == 0 || info.end_ip == 0)
 			continue;
 
-		if (cp >= info.start_ip && cp < info.end_ip) {
+		const unw_word_t cpr = reinterpret_cast<unw_word_t>(cp);
+
+		if (cpr >= info.start_ip && cpr < info.end_ip) {
 			unw_get_proc_name (&cursor, symbuf, ss, 0);
 
-			if (cp - info.start_ip > 0) {
+			if (cpr - info.start_ip > 0) {
 				char off[12];
-				snprintf (off, 12, "+0x%x", cp - info.start_ip);
+				snprintf (off, 12, "+0x%lx", cpr - info.start_ip);
 
 				if (strlen(symbuf) + strlen(off) + 4 > ss) {
 					strcpy(symbuf + ss - strlen(off) - 4, "...");
@@ -146,7 +148,7 @@ const char *getCallPonitName(callpoint_t cp, char *buf = 0, size_t size = 0)
 #endif
 
 	// Это как фоллбек даже для libunwind.
-	snprintf(symbuf, ss, "0x%08x", cp);
+	snprintf(symbuf, ss, "%p", cp);
 	return symbuf;
 }
 
@@ -351,7 +353,7 @@ void *alloc (size_t size, callpoint_t cp, uint32_t aclass)
 	const uint32_t asize = (size + tail_zone + 15) & ~15;
 
 	for (uint8_t *bptr = sheap; bptr < sheap + heap_size; ) {
-		assert ((uint32_t)bptr % 16 == 0);
+		assert ((unsigned long)bptr % 16 == 0);
 
 		struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
 		assert (block->asize % 16 == 0);
@@ -522,12 +524,13 @@ void *alloc (size_t size, callpoint_t cp, uint32_t aclass)
 		ptr = heapmgr::alloc(size, cp, aclass);
 
 		if (ptr == 0) {
-			printf("\t*** No memory for alloc(%u), called from %s\n", size, getCallPonitName(cp));
+			printf("\t*** No memory for alloc(%u), called from %s\n",
+				uint32_t(size), getCallPonitName(cp));
 			assert(!"No memory");
 		}
 	}
 
-	assert ((uint32_t)ptr % 16 == 0);
+	assert ((unsigned long)ptr % 16 == 0);
 	return ptr;
 }
 
@@ -566,7 +569,7 @@ void *realloc (void *ptr, size_t size, callpoint_t cp, uint32_t aclass)
 	if (nptr == 0) return 0;
 
 	if (ptr != 0) {
-		memcpy(nptr, ptr, min(size, blocksize(ptr)));
+		memcpy(nptr, ptr, min(uint32_t(size), blocksize(ptr)));
 	}
 
 	free (ptr, cp, aclass);
@@ -625,7 +628,7 @@ callpoint_t getCallPoint()
 
 	unw_word_t ip;
 	unw_get_reg(&cursor, UNW_REG_IP, &ip);
-	return ip;
+	return reinterpret_cast<callpoint_t>(ip);
 
 // 	while (unw_step(&cursor) > 0) {
 // 		char sym[80];
@@ -723,7 +726,7 @@ void operator delete (void *ptr) throw()
 	heapif::free(ptr, cp, CLASS_NEW);
 }
 
-void *operator new[] (unsigned int size)
+void *operator new[] (size_t size)
 {
 	const callpoint_t cp = getCallPoint();
 	return heapif::alloc (size, cp, CLASS_NEW_ARRAY);
