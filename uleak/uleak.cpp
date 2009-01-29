@@ -29,7 +29,7 @@ namespace {
 
 // Частота вызова переодических операций.
 // Меряется количествами вызовов функций alloc/free
-const uint32_t operation_period = 30000;
+const uint32_t operation_period = 10000;
 
 // Ругаться на free(0)
 const bool free_zero = false;
@@ -73,12 +73,15 @@ const uint8_t AFILL = 0xAB;
 
 struct block_control {
 	uint32_t asize;	// aligned size
-	uint32_t size;
 	uint16_t cp_idx;
 	uint8_t aclass;	// класс операций памяти
 	uint8_t flags;
 
-	uint32_t cache_link;
+//	union {
+		uint32_t size;
+		uint32_t cache_link;
+//		uint64_t reserved;	// Задает размер юнии
+//	};
 
 	uint8_t ptr[0];
 } __attribute__((packed));
@@ -87,7 +90,6 @@ enum {
 	BF_USED = 0x0001,
 };
 
-// Потом сокращу до 16
 BOOST_STATIC_ASSERT(sizeof(struct block_control) == 16);
 BOOST_STATIC_ASSERT(call_points < 0x7fff);
 
@@ -471,7 +473,7 @@ void *alloc (size_t size, callpoint_t cp, uint32_t aclass)
 		nblock->asize -= sizeof(struct block_control) + asize;
 
 		block = nextblock(nblock);
-		block->asize = block->size = asize;
+		block->asize = asize;
 
 		cache::storeblock(nblock);
 	}
@@ -628,7 +630,11 @@ public:
 	}
 
 	~lock_t() {
-		__sync_lock_release(&m_lock);
+		__sync_lock_release(&m_lock, UNLOCKED);
+	}
+
+	static void init() {
+		__sync_lock_release(&m_lock, UNLOCKED);
 	}
 };
 
@@ -638,12 +644,13 @@ bool active = false;
 
 void init()
 {
-	heapmgr::init();
-	cpmgr::init();
-
 	// Для корректного вывода.
 	setvbuf(stdout, NULL, _IONBF, 0);
 
+	heapmgr::init();
+	cpmgr::init();
+
+	lock_t::init();
 	active = true;
 }
 
