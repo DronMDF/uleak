@@ -405,7 +405,7 @@ void *alloc (size_t size, callpoint_t cp, uint32_t aclass)
 	struct block_control *block = cache::findblock(size, asize);
 	if (block == 0) return 0;
 
-	if (block->asize > sizeof(struct block_control) + asize) {
+	if (block->asize > asize + sizeof(struct block_control) + tail_zone) {
 		// Отделяем для выделения блок с конца!
 		struct block_control *nblock = block;
 
