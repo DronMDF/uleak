@@ -94,9 +94,9 @@ BOOST_STATIC_ASSERT(call_points < 0x7fff);
 
 bool isActive = false;
 
-uint8_t sheap[heap_size];
-
 typedef const void *callpoint_t;
+
+uint8_t sheap[heap_size];
 
 // -----------------------------------------------------------------------------
 
@@ -351,6 +351,17 @@ void speriodic()
 
 namespace heapmgr {
 
+struct block_control * const begin_block =
+	reinterpret_cast<struct block_control *>(sheap);
+const struct block_control * const end_block =
+	reinterpret_cast<struct block_control *>(sheap + heap_size);
+
+struct block_control *nextblock(struct block_control *block)
+{
+	// Должен быть корректно установлен asize;
+	return reinterpret_cast<struct block_control *>(block->ptr + block->asize);
+}
+
 namespace cache {
 
 void storeblock (struct block_control *block)
@@ -361,21 +372,19 @@ void storeblock (struct block_control *block)
 struct block_control *findblock(size_t size, size_t asize)
 {
 	// Здесь пока последовательный поиск, буду переделывать на индексированный
-	for (uint8_t *bptr = sheap; bptr < sheap + heap_size; ) {
-		assert ((unsigned long)bptr % 16 == 0);
-
-		struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
+	struct block_control *block = begin_block;
+	while (block < end_block) {
 		assert (block->asize % 16 == 0);
 
 		if ((block->flags & BF_USED) == 0 && block->asize >= asize) {
 			sblock_free_check (block);
-
 			return block;
 		}
 
-		bptr += sizeof(struct block_control) + block->asize;
+		block = nextblock(block);
 	}
 
+	assert (block == end_block);
 	return 0;
 }
 
@@ -383,6 +392,8 @@ struct block_control *findblock(size_t size, size_t asize)
 
 void *alloc (size_t size, callpoint_t cp, uint32_t aclass)
 {
+	assert (aclass < 3);
+
 	if (size == 0) {
 		char name[80];
 		printf ("\t*** zero size alloc from %s\n",
@@ -400,8 +411,7 @@ void *alloc (size_t size, callpoint_t cp, uint32_t aclass)
 
 		nblock->asize -= sizeof(struct block_control) + asize;
 
-		// TODO: какая ужасная конструкция, надо что-то изобразить.
-		block = reinterpret_cast<struct block_control *>(reinterpret_cast<uint8_t *>(nblock) + sizeof(struct block_control) + nblock->asize);
+		block = nextblock(nblock);
 		block->asize = block->size = asize;
 	}
 
@@ -440,8 +450,8 @@ void free (void *ptr, callpoint_t cp, uint32_t aclass)
 	struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
 
 	if ((block->flags & BF_USED) == 0) {
-		for (uint8_t *fptr = sheap; fptr < sheap + heap_size; ) {
-			struct block_control *fblock = reinterpret_cast<struct block_control *>(fptr);
+		struct block_control *fblock = begin_block;
+		while (fblock < end_block) {
 			assert (fblock->asize % 16 == 0);
 
 			if (fblock == block) {
@@ -452,9 +462,9 @@ void free (void *ptr, callpoint_t cp, uint32_t aclass)
 				return;
 			}
 
-			fptr += sizeof(struct block_control) + fblock->asize;
-			assert (fptr <= sheap + heap_size);
+			fblock = nextblock(fblock);
 		}
+		assert (fblock == end_block);
 
 		// Кривой указатель или блок освобожден уже слишком давно.
 		char name[80];
@@ -492,25 +502,25 @@ void defrag ()
 {
 	uint32_t maxfree = 0;
 
-	for (uint8_t *bptr = sheap; bptr < sheap + heap_size; ) {
-		struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
+	struct block_control *block = begin_block;
+	while (block < end_block) {
 		assert (block->asize % 16 == 0);
 
 		if ((block->flags & BF_USED) == 0) {
 			sblock_free_check(block);
 
 			while (true) {
-				uint8_t *nbptr = block->ptr + block->asize;
-				if (nbptr >= sheap + heap_size) break;
+				struct block_control *nblock = nextblock(block);
+				assert (nblock <= end_block);
+				if (nblock == end_block) break;
 
-				struct block_control *nblock = reinterpret_cast<struct block_control *>(nbptr);
 				assert (nblock->asize % 16 == 0);
+
 				if ((nblock->flags & BF_USED) != 0) break;
 
 				sblock_free_check (nblock);
 
 				block->asize += sizeof(struct block_control) + nblock->asize;
-				block->size = block->asize;
 			}
 
 			sblock_free_init(block);
@@ -520,10 +530,9 @@ void defrag ()
 			}
 		}
 
-		// Накладные расходы складываются из заголовков блоков.
-		bptr += sizeof(struct block_control) + block->asize;
-		assert (bptr <= sheap + heap_size);
+		block = nextblock(block);
 	}
+	assert (block == end_block);
 
 	printf ("\t*** defrag. max free block - %u\n", maxfree);
 	speriodic();
