@@ -351,6 +351,36 @@ void speriodic()
 
 namespace heapmgr {
 
+namespace cache {
+
+void storeblock (struct block_control *block)
+{
+	// Пока здесь ничего нету.
+}
+
+struct block_control *findblock(size_t size, size_t asize)
+{
+	// Здесь пока последовательный поиск, буду переделывать на индексированный
+	for (uint8_t *bptr = sheap; bptr < sheap + heap_size; ) {
+		assert ((unsigned long)bptr % 16 == 0);
+
+		struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
+		assert (block->asize % 16 == 0);
+
+		if ((block->flags & BF_USED) == 0 && block->asize >= asize) {
+			sblock_free_check (block);
+
+			return block;
+		}
+
+		bptr += sizeof(struct block_control) + block->asize;
+	}
+
+	return 0;
+}
+
+} // namespace cache
+
 void *alloc (size_t size, callpoint_t cp, uint32_t aclass)
 {
 	if (size == 0) {
@@ -361,51 +391,37 @@ void *alloc (size_t size, callpoint_t cp, uint32_t aclass)
 
 	const uint32_t asize = (size + tail_zone + 15) & ~15;
 
-	for (uint8_t *bptr = sheap; bptr < sheap + heap_size; ) {
-		assert ((unsigned long)bptr % 16 == 0);
+	struct block_control *block = cache::findblock(size, asize);
+	if (block == 0) return 0;
 
-		struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
-		assert (block->asize % 16 == 0);
+	if (block->asize > sizeof(struct block_control) + asize) {
+		// Отделяем для выделения блок с конца!
+		struct block_control *nblock = block;
 
-		if ((block->flags & BF_USED) == 0 && block->asize >= asize) {
-			sblock_free_check (block);
+		nblock->asize -= sizeof(struct block_control) + asize;
 
-			if (block->asize > sizeof(struct block_control) + asize) {
-				// Отделяем для выделения блок с конца!
-				struct block_control *nblock = block;
-
-				nblock->asize -= sizeof(struct block_control) + asize;
-				// А size и oldcp пусть остаются вообще старыми
-
-				bptr += sizeof(struct block_control) + nblock->asize;
-				block = reinterpret_cast<struct block_control *>(bptr);
-
-				block->asize = block->size = asize;
-			}
-
-			block->flags |= BF_USED;
-
-			assert (size <= block->asize);
-			block->size = size;
-			block->aclass = aclass;
-
-			sblock_tail_init (block);
-
-			block->cp_idx = cpmgr::scallpointalloc(block, cp);
-
-			// Собрать статистику.
-			memory_used += block->size;
-			if (memory_used > memory_max_used) {
-				memory_max_used = memory_used;
-			}
-
-			return block->ptr;
-		}
-
-		bptr += sizeof(struct block_control) + block->asize;
+		// TODO: какая ужасная конструкция, надо что-то изобразить.
+		block = reinterpret_cast<struct block_control *>(reinterpret_cast<uint8_t *>(nblock) + sizeof(struct block_control) + nblock->asize);
+		block->asize = block->size = asize;
 	}
 
-	return 0;
+	block->flags |= BF_USED;
+
+	assert (size <= block->asize);
+	block->size = size;
+	block->aclass = aclass;
+
+	sblock_tail_init (block);
+
+	block->cp_idx = cpmgr::scallpointalloc(block, cp);
+
+	// Собрать статистику.
+	memory_used += block->size;
+	if (memory_used > memory_max_used) {
+		memory_max_used = memory_used;
+	}
+
+	return block->ptr;
 }
 
 void free (void *ptr, callpoint_t cp, uint32_t aclass)
