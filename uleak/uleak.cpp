@@ -29,13 +29,13 @@ namespace {
 
 // Частота вызова переодических операций.
 // Меряется количествами вызовов функций alloc/free
-const uint32_t operation_period = 10000;
+const uint32_t operation_period = 30000;
 
 // Ругаться на free(0)
 const bool free_zero = false;
 
 // Заполнение освобождаемых блоков и контроль использования после освобождения (может производиться с большо-о-ой задержкой)
-const bool check_free = false;
+const bool check_free = true;
 const uint32_t check_free_limit = 1024;	// Максимально проверяемый размер блока
 const bool check_free_repetition = false;
 
@@ -46,13 +46,13 @@ const bool check_tail_repetition = false;
 const uint32_t tail_zone = check_tail ? 32 : 0;
 
 // размер хипа.
-const uint32_t heap_size = 64 * 1024 * 1024;
+const uint32_t heap_size = 256 * 1024 * 1024;
 
 // количество точек вызова. Их должно хватать. если не хватает будет assert.
 const int call_points = 8192;
 
 // Допустимое количество блоков на точку. во избежание лишней ругани.
-const uint32_t block_limit = 50000;
+const uint32_t block_limit = 100000;
 
 // Типы операторов освобождения должны соответствовать операторам выделения.
 enum {
@@ -78,14 +78,13 @@ struct block_control {
 	uint8_t aclass;	// класс операций памяти
 	uint8_t flags;
 
-	uint32_t cp __attribute__((deprecated));
+	uint32_t cache_link;
 
 	uint8_t ptr[0];
 } __attribute__((packed));
 
 enum {
 	BF_USED = 0x0001,
-
 };
 
 // Потом сокращу до 16
@@ -337,39 +336,118 @@ struct block_control * const begin_block =
 const struct block_control * const end_block =
 	reinterpret_cast<struct block_control *>(sheap + heap_size);
 
+// утилиты всякие...
 struct block_control *nextblock(struct block_control *block)
 {
 	// Должен быть корректно установлен asize;
 	return reinterpret_cast<struct block_control *>(block->ptr + block->asize);
 }
 
+struct block_control *getBlockByPtr(void *ptr)
+{
+	uint8_t *bptr = reinterpret_cast<uint8_t *>(ptr) - sizeof (struct block_control);
+	struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
+
+	if (block < begin_block || block >= end_block)
+		return 0;
+
+	return block;
+}
+
 namespace cache {
+
+// Кэш существует ради ускорения менеджера до приемлимых скоростей.
+
+uint32_t bcache[17];
+
+const uint32_t cache_empty = 0xffffffff;
+
+void init()
+{
+	for (int i = 0; i < 17; i++)
+		bcache[i] = cache_empty;
+}
+
+uint32_t getcacheindex(struct block_control *block)
+{
+	return reinterpret_cast<uint8_t *>(block) - sheap;
+}
+
+struct block_control *getcacheblock(uint32_t idx)
+{
+	assert (idx < heap_size);
+	return reinterpret_cast<struct block_control *>(sheap + idx);
+}
 
 void storeblock (struct block_control *block)
 {
-	// Пока здесь ничего нету.
+	int cidx = (block->asize - tail_zone - 1) / 16;
+	if (cidx > 15) cidx = 16;
+
+	block->cache_link = bcache[cidx];
+	bcache[cidx] = getcacheindex(block);
 }
 
-struct block_control *findblock(size_t size, size_t asize)
+struct block_control *findblock(size_t asize)
 {
-	// Здесь пока последовательный поиск, буду переделывать на индексированный
-	struct block_control *block = begin_block;
-	while (block < end_block) {
-		assert (block->asize % 16 == 0);
+	// Поиск блока по кешу.
+	int cidx = (asize - tail_zone - 1) / 16;
+	if (cidx > 15) cidx = 16;
 
-		if ((block->flags & BF_USED) == 0 && block->asize >= asize) {
-			sblock_free_check (block);
-			return block;
+	while (cidx < 17) {
+		// Строки кеша до 16 не требуют перебора, все блоки в них одинаковы.
+		// Но они вполне нормально прокатят по общему алгоритму.
+
+		uint32_t *idxptr = &(bcache[cidx]);
+		while (*idxptr != cache_empty) {
+			struct block_control *block = getcacheblock(*idxptr);
+
+			if (block->asize >= asize) {
+				// отлинковать
+				*idxptr = block->cache_link;
+				return block;
+			}
+
+			idxptr = &(block->cache_link);
 		}
 
-		block = nextblock(block);
+		cidx++;
 	}
 
-	assert (block == end_block);
 	return 0;
+
+// 	// Здесь пока последовательный поиск, буду переделывать на индексированный
+// 	struct block_control *block = begin_block;
+// 	while (block < end_block) {
+// 		assert (block->asize % 16 == 0);
+//
+// 		if ((block->flags & BF_USED) == 0 && block->asize >= asize) {
+// 			sblock_free_check (block);
+// 			return block;
+// 		}
+//
+// 		block = nextblock(block);
+// 	}
+//
+// 	assert (block == end_block);
+// 	return 0;
 }
 
 } // namespace cache
+
+void init()
+{
+	cache::init();
+
+	begin_block->asize = heap_size - sizeof(struct block_control);
+	assert (begin_block->asize % 16 == 0);
+
+	begin_block->flags = 0;
+	begin_block->cp_idx = -1;
+
+	sblock_free_init(begin_block);
+	cache::storeblock(begin_block);
+}
 
 void *alloc (size_t size, callpoint_t cp, uint32_t aclass)
 {
@@ -383,7 +461,7 @@ void *alloc (size_t size, callpoint_t cp, uint32_t aclass)
 
 	const uint32_t asize = (size + tail_zone + 15) & ~15;
 
-	struct block_control *block = cache::findblock(size, asize);
+	struct block_control *block = cache::findblock(asize);
 	if (block == 0) return 0;
 
 	if (block->asize > asize + sizeof(struct block_control) + tail_zone) {
@@ -417,18 +495,21 @@ void *alloc (size_t size, callpoint_t cp, uint32_t aclass)
 
 void free (void *ptr, callpoint_t cp, uint32_t aclass)
 {
-	if (ptr < sheap || ptr >= sheap + heap_size) {
-		if (ptr != 0 || free_zero) {
+	struct block_control *block = getBlockByPtr(ptr);
+
+	if (block == 0) {
+		if (ptr != 0) {
 			char name[80];
 			printf ("\t*** free unknown block %p from %s\n",
 				ptr, getCallPonitName(cp, name, 80));
+		} else if (free_zero) {
+			char name[80];
+			printf ("\t*** free zero pointer from %s\n",
+				getCallPonitName(cp, name, 80));
 		}
 
 		return;
 	}
-
-	uint8_t *bptr = reinterpret_cast<uint8_t *>(ptr) - sizeof (struct block_control);
-	struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
 
 	if ((block->flags & BF_USED) == 0) {
 		struct block_control *fblock = begin_block;
@@ -485,7 +566,7 @@ void defrag ()
 {
 	uint32_t maxfree = 0;
 
-	// TODO: а вот дефрагментация плохо согласуется с кешем...
+	cache::init();
 
 	struct block_control *block = begin_block;
 	while (block < end_block) {
@@ -519,7 +600,14 @@ void defrag ()
 	assert (block == end_block);
 
 	printf ("\t*** defrag. max free block - %u\n", maxfree);
-	speriodic();
+}
+
+uint32_t blocksize (void *ptr)
+{
+	struct block_control *block = getBlockByPtr(ptr);
+	assert (block != 0);
+	assert ((block->flags & BF_USED) != 0);	// Блок должен быть занят, только тогда size актуален.
+	return block->size;
 }
 
 } // namespace heapmgr
@@ -550,16 +638,7 @@ bool active = false;
 
 void init()
 {
-	// TODO: перенести в heapmgr
-	heapmgr::begin_block->asize = heap_size - sizeof(struct block_control);
-	assert (heapmgr::begin_block->asize % 16 == 0);
-
-	heapmgr::begin_block->flags = 0;
-	heapmgr::begin_block->cp_idx = -1;
-
-	sblock_free_init(heapmgr::begin_block);
-	heapmgr::cache::storeblock(heapmgr::begin_block);
-
+	heapmgr::init();
 	cpmgr::init();
 
 	// Для корректного вывода.
@@ -606,11 +685,7 @@ uint32_t blocksize(void *ptr)
 	assert(active);
 	lock_t lock;
 
-	// TODO: перенести в heapmgr
-	uint8_t *bptr = reinterpret_cast<uint8_t *>(ptr) - sizeof(struct block_control);
-	struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
-	assert ((block->flags & BF_USED) != 0);	// Блок должен быть занят, только тогда size актуален.
-	return block->size;
+	return heapmgr::blocksize(ptr);
 }
 
 uint32_t blockcount(callpoint_t cp)

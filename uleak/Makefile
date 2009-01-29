@@ -12,7 +12,7 @@ VERSION_PATCH = 0
 VERSION=${VERSION_RELEASE}.${VERSION_BETA}.${VERSION_ALPHA}
 
 WFLAGS=-Wall -Wextra -Weffc++
-OFLAGS=-O2 -ggdb3
+OFLAGS=-O0 -ggdb3
 CFLAGS=
 LDFLAGS=-lc -lstdc++
 
@@ -35,7 +35,7 @@ uleak.o: uleak.cpp
 
 benchmark: benchmark.cpp libuleak.a
 	g++ ${WFLAGS} ${OFLAGS} ${CFLAGS} -o $@ $< libuleak.a ${LDFLAGS} -lrt
-	./$@
+	-./$@
 
 .PHONY: clean
 clean:
