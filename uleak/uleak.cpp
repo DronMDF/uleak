@@ -92,8 +92,6 @@ enum {
 BOOST_STATIC_ASSERT(sizeof(struct block_control) == 16);
 BOOST_STATIC_ASSERT(call_points < 0x7fff);
 
-bool isActive = false;
-
 typedef const void *callpoint_t;
 
 uint8_t sheap[heap_size];
@@ -310,23 +308,6 @@ void sblock_free_check_all ()
 // -----------------------------------------------------------------------------
 // Инициализация.
 
-void sinit()
-{
-	struct block_control *block = reinterpret_cast<struct block_control *>(sheap);
-	block->asize = block->size = heap_size - sizeof(struct block_control);
-	block->flags = 0;
-	assert (block->asize % 16 == 0);
-
-	sblock_free_init(block);
-
-	cpmgr::init();
-
-	// Для корректного вывода.
-	setvbuf(stdout, NULL, _IONBF, 0);
-
-	isActive = true;
-}
-
 // -----------------------------------------------------------------------------
 // Переодические операции (статистика по памяти по любому плюс опциональные вещи)
 
@@ -413,6 +394,8 @@ void *alloc (size_t size, callpoint_t cp, uint32_t aclass)
 
 		block = nextblock(nblock);
 		block->asize = block->size = asize;
+
+		cache::storeblock(nblock);
 	}
 
 	block->flags |= BF_USED;
@@ -427,9 +410,7 @@ void *alloc (size_t size, callpoint_t cp, uint32_t aclass)
 
 	// Собрать статистику.
 	memory_used += block->size;
-	if (memory_used > memory_max_used) {
-		memory_max_used = memory_used;
-	}
+	memory_max_used = max(memory_max_used, memory_used);
 
 	return block->ptr;
 }
@@ -491,7 +472,9 @@ void free (void *ptr, callpoint_t cp, uint32_t aclass)
 	cpmgr::scallpointfree(block, cp);
 	sblock_tail_check (block);
 	block->flags = 0;
-	sblock_free_init (block);
+
+	sblock_free_init(block);
+	cache::storeblock(block);
 
 	assert (memory_used >= block->size);
 	// статистика.
@@ -501,6 +484,8 @@ void free (void *ptr, callpoint_t cp, uint32_t aclass)
 void defrag ()
 {
 	uint32_t maxfree = 0;
+
+	// TODO: а вот дефрагментация плохо согласуется с кешем...
 
 	struct block_control *block = begin_block;
 	while (block < end_block) {
@@ -524,10 +509,9 @@ void defrag ()
 			}
 
 			sblock_free_init(block);
+			cache::storeblock(block);
 
-			if (block->asize > maxfree) {
-				maxfree = block->asize;
-			}
+			maxfree = max(maxfree, block->asize);
 		}
 
 		block = nextblock(block);
@@ -562,10 +546,32 @@ public:
 
 volatile lock_t::lock_state lock_t::m_lock = UNLOCKED;
 
+bool active = false;
+
+void init()
+{
+	// TODO: перенести в heapmgr
+	heapmgr::begin_block->asize = heap_size - sizeof(struct block_control);
+	assert (heapmgr::begin_block->asize % 16 == 0);
+
+	heapmgr::begin_block->flags = 0;
+	heapmgr::begin_block->cp_idx = -1;
+
+	sblock_free_init(heapmgr::begin_block);
+	heapmgr::cache::storeblock(heapmgr::begin_block);
+
+	cpmgr::init();
+
+	// Для корректного вывода.
+	setvbuf(stdout, NULL, _IONBF, 0);
+
+	active = true;
+}
+
 void *alloc (size_t size, callpoint_t cp, uint32_t aclass)
 {
 	assert (size < heap_size);
-	if (!isActive) sinit();
+	if (!active) init();
 	lock_t lock;
 	speriodic();
 
@@ -589,7 +595,7 @@ void *alloc (size_t size, callpoint_t cp, uint32_t aclass)
 
 void free (void *ptr, callpoint_t cp, uint32_t aclass)
 {
-	assert(isActive);
+	assert(active);
 	lock_t lock;
 	speriodic();
 	heapmgr::free(ptr, cp, aclass);
@@ -597,17 +603,19 @@ void free (void *ptr, callpoint_t cp, uint32_t aclass)
 
 uint32_t blocksize(void *ptr)
 {
-	assert(isActive);
+	assert(active);
 	lock_t lock;
 
+	// TODO: перенести в heapmgr
 	uint8_t *bptr = reinterpret_cast<uint8_t *>(ptr) - sizeof(struct block_control);
 	struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
+	assert ((block->flags & BF_USED) != 0);	// Блок должен быть занят, только тогда size актуален.
 	return block->size;
 }
 
 uint32_t blockcount(callpoint_t cp)
 {
-	if (!isActive) sinit();
+	if (!active) init();
 	lock_t lock;
 
 	// TODO: определить количество блоков в этой точке вызова.
