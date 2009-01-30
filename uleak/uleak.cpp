@@ -232,47 +232,6 @@ callpoint_t getCallPoint(int idx)
 
 } // namespace cpmgr
 
-// -----------------------------------------------------------------------------
-// Проверка переполнений блока
-
-void sblock_tail_init (struct block_control *block)
-{
-	if (!check_tail) return;
-	memset (block->ptr + block->size, AFILL, block->asize - block->size);
-}
-
-void sblock_tail_check (const struct block_control *block)
-{
-	if (!check_tail) return;
-
-	for (int i = block->asize - block->size - 1; i >= 0; i--) {
-		if (block->ptr[block->size + i] != AFILL) {
-			char name[80];
-			printf ("\t*** corrupted block tail, %u bytes, allocated from %s, size %u\n",
-				i, getCallPonitName(cpmgr::getCallPoint(block->cp_idx), name, 80), block->size);
-			BOOST_ASSERT(!"Corrupted block tail");
-		}
-	}
-
-}
-
-void sblock_tail_check_all ()
-{
-	if (!check_tail_repetition) return;
-
-	for (uint8_t *bptr = sheap; bptr < sheap + heap_size; ) {
-		struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
-		BOOST_ASSERT (block->asize % 16 == 0);
-
-		if ((block->flags & BF_USED) != 0) {
-			sblock_tail_check (block);
-		}
-
-		bptr += sizeof(struct block_control) + block->asize;
-		BOOST_ASSERT (bptr <= sheap + heap_size);
-	}
-}
-
 namespace heapmgr {
 
 struct block_control * const begin_block =
@@ -296,6 +255,53 @@ struct block_control *getBlockByPtr(void *ptr)
 		return 0;
 
 	return block;
+}
+
+// -----------------------------------------------------------------------------
+// Проверка переполнений блока
+
+void blocktail_init (struct block_control *block)
+{
+	BOOST_ASSERT ((block->flags & BF_USED) != 0);
+
+	if (!check_tail) return;
+
+	memset (block->ptr + block->size, AFILL, block->asize - block->size);
+}
+
+void blocktail_check (const struct block_control *block)
+{
+	BOOST_ASSERT ((block->flags & BF_USED) != 0);
+
+	if (!check_tail) return;
+
+	for (int i = block->asize - block->size - 1; i >= 0; i--) {
+		if (block->ptr[block->size + i] != AFILL) {
+			char name[80];
+			printf ("\t*** corrupted block tail, %u bytes, allocated from %s, size %u\n",
+				i, getCallPonitName(cpmgr::getCallPoint(block->cp_idx), name, 80), block->size);
+			BOOST_ASSERT(!"Corrupted block tail");
+		}
+	}
+
+}
+
+void blocktail_check_all ()
+{
+	if (!check_tail_repetition) return;
+
+	struct block_control *block = begin_block;
+	while (block < end_block) {
+		BOOST_ASSERT (block->asize % 16 == 0);
+
+		if ((block->flags & BF_USED) != 0) {
+			blocktail_check (block);
+		}
+
+		block = nextblock(block);
+	}
+
+	BOOST_ASSERT (block == end_block);
 }
 
 // -----------------------------------------------------------------------------
@@ -483,7 +489,7 @@ void *alloc (size_t size, callpoint_t cp, uint32_t aclass)
 	block->size = size;
 	block->aclass = aclass;
 
-	sblock_tail_init (block);
+	blocktail_init (block);
 
 	block->cp_idx = cpmgr::scallpointalloc(block, cp);
 
@@ -552,7 +558,7 @@ void free (void *ptr, callpoint_t cp, uint32_t aclass)
 	}
 
 	cpmgr::scallpointfree(block, cp);
-	sblock_tail_check (block);
+	blocktail_check (block);
 	block->flags = 0;
 
 	freeblock_init(block);
@@ -663,7 +669,7 @@ void periodic()
 	// Статистика использования памяти.
 	printf ("\t*** Heap used: %u, max: %u\n", memory_used, memory_max_used);
 
-	sblock_tail_check_all();
+	heapmgr::blocktail_check_all();
 	heapmgr::freeblock_check_all();
 }
 
