@@ -17,7 +17,7 @@ const uint32_t ptrcount = 1000;
 const uint32_t blocksize = 32768;	// это дает примерно 16 мегабайт...
 }
 
-int main (int argc, char **argv)
+int main (int, char **)
 {
 	void *ptrs[ptrcount] = {0};
 
