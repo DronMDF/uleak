@@ -83,15 +83,15 @@ const uint8_t AFILL = 0xAB;
 
 struct block_control {
 	uint32_t asize;	// aligned size
-	uint16_t cp_idx;
+	int16_t cp_idx;
 	uint8_t aclass;	// класс операций памяти
 	uint8_t flags;
 
-//	union {
+	union {
 		uint32_t size;
-		uint32_t cache_link;
-//		uint64_t reserved;	// Задает размер юнии
-//	};
+		struct block_control *next;
+		uint64_t reserved;	// Задает размер юнии
+	};
 
 	uint8_t ptr[0];
 } __attribute__((packed));
@@ -360,27 +360,13 @@ namespace cache {
 
 // Кэш существует ради ускорения менеджера до приемлимых скоростей.
 
-uint32_t bcache[17];
-
-const uint32_t cache_empty = 0xffffffff;
+struct block_control *pcache[17];
 
 void init()
 {
-	for (int i = 0; i < 17; i++)
-		bcache[i] = cache_empty;
-}
-
-uint32_t getcacheindex(struct block_control *block)
-{
-	return (reinterpret_cast<uint8_t *>(block) - sheap) | 0x80000000;
-}
-
-struct block_control *getcacheblock(uint32_t idx)
-{
-	BOOST_ASSERT ((idx & 0x80000000) != 0);
-	const uint32_t iidx = idx & 0x7fffffff;
-	BOOST_ASSERT (iidx < heap_size);
-	return reinterpret_cast<struct block_control *>(sheap + iidx);
+	for (int i = 0; i < 17; i++) {
+		pcache[i] = 0;
+	}
 }
 
 void storeblock (struct block_control *block)
@@ -389,8 +375,8 @@ void storeblock (struct block_control *block)
 	int cidx = (block->asize - tail_zone - 1) / 16;
 	if (cidx > 15) cidx = 16;
 
-	block->cache_link = bcache[cidx];
-	bcache[cidx] = getcacheindex(block);
+	block->next = pcache[cidx];
+	pcache[cidx] = block;
 }
 
 struct block_control *findblock(size_t asize)
@@ -403,18 +389,18 @@ struct block_control *findblock(size_t asize)
 		// Строки кеша до 16 не требуют перебора, все блоки в них одинаковы.
 		// Но они вполне нормально прокатят по общему алгоритму.
 
-		uint32_t *idxptr = &(bcache[cidx]);
-		while (*idxptr != cache_empty) {
-			struct block_control *block = getcacheblock(*idxptr);
+		struct block_control **bptr = &(pcache[cidx]);
+		while (*bptr != 0) {
+			struct block_control *block = *bptr;
  			freeblock_check (block);
 
 			if (block->asize >= asize) {
 				// отлинковать
-				*idxptr = block->cache_link;
+				*bptr = block->next;
 				return block;
 			}
 
-			idxptr = &(block->cache_link);
+			bptr = &(block->next);
 		}
 
 		cidx++;
@@ -559,14 +545,14 @@ void free (void *ptr, callpoint_t cp, uint32_t aclass)
 
 	cpmgr::scallpointfree(block, cp);
 	blocktail_check (block);
-	block->flags = 0;
-
-	freeblock_init(block);
-	cache::storeblock(block);
 
 	BOOST_ASSERT (memory_used >= block->size);
 	// статистика.
 	memory_used -= block->size;
+
+	block->flags = 0;
+	freeblock_init(block);
+	cache::storeblock(block);
 }
 
 void defrag ()
