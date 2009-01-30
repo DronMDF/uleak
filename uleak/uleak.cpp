@@ -47,12 +47,15 @@ const bool free_zero = false;
 
 // Заполнение освобождаемых блоков и контроль использования после освобождения (может производиться с большо-о-ой задержкой)
 const bool check_free = true;
-const uint32_t check_free_limit = 1024;	// Максимально проверяемый размер блока
-const bool check_free_repetition = false;
+const uint32_t check_free_limit = 256;	// Максимально проверяемый размер блока
+const bool check_free_repetition = true;
+
+// Хранить свободные блоки по возможности дольше. (замедляет работу в ~60 раз)
+const bool keep_free = false;
 
 // Контролировать пространство за пределами блока
 const bool check_tail = true;
-const bool check_tail_repetition = false;
+const bool check_tail_repetition = true;
 // Размер буферной зоны
 const uint32_t tail_zone = check_tail ? 32 : 0;
 
@@ -375,8 +378,17 @@ void storeblock (struct block_control *block)
 	int cidx = (block->asize - tail_zone - 1) / 16;
 	if (cidx > 15) cidx = 16;
 
-	block->next = pcache[cidx];
-	pcache[cidx] = block;
+	if (pcache[cidx] != 0 && keep_free) {
+		// Добавляем блоки в конец цепочки.
+		block->next = 0;
+		struct block_control *cblock = pcache[cidx];
+		while (cblock->next != 0)
+			cblock = cblock->next;
+		cblock->next = block;
+	} else {
+		block->next = pcache[cidx];
+		pcache[cidx] = block;
+	}
 }
 
 struct block_control *findblock(size_t asize)
