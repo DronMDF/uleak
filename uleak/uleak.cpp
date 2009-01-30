@@ -233,6 +233,19 @@ callpoint_t getCallPoint(int idx)
 	return cparray[idx].cp;
 }
 
+void result()
+{
+	for (int i = 0; i < call_points; i++) {
+		if (cparray[i].cp == 0) break;
+		if (cparray[i].current_blocks == 0) continue;
+
+		// NOTE: Эта функция вызывается значительно позже всего, видимо
+		// из за этого функция getCallPonitName крешится.
+		printf ("\t*** memory leak %u blocks with size %u, allocated from %p.\n",
+			cparray[i].current_blocks, cparray[i].size, cparray[i].cp);
+	}
+}
+
 } // namespace cpmgr
 
 namespace heapmgr {
@@ -652,8 +665,20 @@ void init()
 	cpmgr::init();
 
 	lock_t::init();
+
 	active = true;
 }
+
+void finit()
+{
+	cpmgr::result();
+}
+
+static class finit_runner {
+public:
+	// atexit вызывается раньше, чем деструктор статического класса.
+	~finit_runner() { finit(); }
+} fr;
 
 void periodic()
 {

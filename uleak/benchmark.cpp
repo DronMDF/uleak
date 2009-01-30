@@ -12,7 +12,7 @@
 // r15: 28.59 sec, 1049 alloc/free per sec
 
 namespace {
-const uint32_t opcount = 30000;
+const uint32_t opcount = 250000;
 const uint32_t ptrcount = 1000;
 const uint32_t blocksize = 32768;	// это дает примерно 16 мегабайт...
 }
