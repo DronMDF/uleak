@@ -5,7 +5,6 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <assert.h>
 #include <stdint.h>
 #include <unistd.h>
 
@@ -20,10 +19,16 @@
 
 using namespace std;
 
-// TODO: Для ускорения работы менеджера необходимо ввести очереди блоков. Только
-//	вместо ссылок в них можно хранить смещения относительно sheap. Это будет
-//	удобнее в плане переносимости.
+// TODO: Для ускорения работы менеджера необходимо ввести очереди блоков.
+// В 16-байтном заголовке блока места хватает и на указатель, если учесть что
+// size используется только для занятых блоков.
 
+// Все стандартные ассерты в линуксе юзают malloc. :( а вот во FreeBSD - не юзают.
+#define ULEAK_ASSERT(exp) 							\
+if(!(exp)) { 									\
+	printf ("%s[%u]: assertion failed '%s'\n", __FILE__, __LINE__, #exp);	\
+	exit(-1); 								\
+}
 
 namespace {
 
@@ -48,7 +53,7 @@ const uint32_t tail_zone = check_tail ? 32 : 0;
 // размер хипа.
 const uint32_t heap_size = 256 * 1024 * 1024;
 
-// количество точек вызова. Их должно хватать. если не хватает будет assert.
+// количество точек вызова. Их должно хватать. если не хватает будет ULEAK_ASSERT.
 const int call_points = 8192;
 
 // Допустимое количество блоков на точку. во избежание лишней ругани.
@@ -68,7 +73,6 @@ uint32_t memory_used = 0;
 uint32_t memory_max_used = 0;
 
 const uint8_t FFILL = 0xFB;
-const uint32_t FFILL32 = 0xFBFBFBFB;
 const uint8_t AFILL = 0xAB;
 
 struct block_control {
@@ -88,6 +92,7 @@ struct block_control {
 
 enum {
 	BF_USED = 0x0001,
+	BF_FFILL = 0x0002,
 };
 
 BOOST_STATIC_ASSERT(sizeof(struct block_control) == 16);
@@ -101,7 +106,7 @@ uint8_t sheap[heap_size];
 
 const char *getCallPonitName(callpoint_t cp, char *buf, size_t bufsz)
 {
-	assert (buf != 0 && bufsz != 0);
+	ULEAK_ASSERT (buf != 0 && bufsz != 0);
 
 	memset(buf, 0, bufsz);	// Паранойя?
 #ifdef LIBUNWIND
@@ -195,14 +200,14 @@ int scallpointalloc(const struct block_control *block, callpoint_t cp)
 		}
 	}
 
-	assert(!"Not avail call point");
+	ULEAK_ASSERT(!"Not avail call point");
 	return -1;
 }
 
 void scallpointfree(const struct block_control *block, callpoint_t cp)
 {
 	const int i = block->cp_idx;
-	assert(i >= 0 && i < call_points);
+	ULEAK_ASSERT(i >= 0 && i < call_points);
 
 	if (cparray[i].current_blocks == 0) {
 		char aname[80], fname[80];
@@ -215,7 +220,7 @@ void scallpointfree(const struct block_control *block, callpoint_t cp)
 
 callpoint_t getCallPoint(int idx)
 {
-	assert (idx >= 0 && idx < call_points);
+	ULEAK_ASSERT (idx >= 0 && idx < call_points);
 	return cparray[idx].cp;
 }
 
@@ -239,7 +244,7 @@ void sblock_tail_check (const struct block_control *block)
 			char name[80];
 			printf ("\t*** corrupted block tail, %u bytes, allocated from %s, size %u\n",
 				i, getCallPonitName(cpmgr::getCallPoint(block->cp_idx), name, 80), block->size);
-			assert(!"Corrupted block tail");
+			ULEAK_ASSERT(!"Corrupted block tail");
 		}
 	}
 
@@ -251,14 +256,14 @@ void sblock_tail_check_all ()
 
 	for (uint8_t *bptr = sheap; bptr < sheap + heap_size; ) {
 		struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
-		assert (block->asize % 16 == 0);
+		ULEAK_ASSERT (block->asize % 16 == 0);
 
 		if ((block->flags & BF_USED) != 0) {
 			sblock_tail_check (block);
 		}
 
 		bptr += sizeof(struct block_control) + block->asize;
-		assert (bptr <= sheap + heap_size);
+		ULEAK_ASSERT (bptr <= sheap + heap_size);
 	}
 }
 
@@ -267,69 +272,34 @@ void sblock_tail_check_all ()
 
 void sblock_free_init (struct block_control *block)
 {
+	ULEAK_ASSERT ((block->flags & BF_USED) == 0);
+
 	if (!check_free) return;
 	if (block->asize > check_free_limit) return;
 
 	// Замусорим блок специально.
 	memset (block->ptr, FFILL, block->asize);
+	block->flags |= BF_FFILL;
 }
 
 void sblock_free_check (const struct block_control *block)
 {
+	ULEAK_ASSERT ((block->flags & BF_USED) == 0);
+
 	if (!check_free) return;
 	if (block->asize > check_free_limit) return;
+
+	ULEAK_ASSERT ((block->flags & BF_FFILL) != 0);
 
 	for (uint32_t i = 0; i < block->asize; i++) {
 		if (block->ptr[i] != FFILL) {
 			char name[80];
 			printf ("\t*** modifyed free block %p, allocated from %s with size %u\n",
-				block->ptr, getCallPonitName(cpmgr::getCallPoint(block->cp_idx), name, 80), block->size);
-			assert(!"Corrupted free block");
+				block->ptr, getCallPonitName(cpmgr::getCallPoint(block->cp_idx), name, 80), block->asize);
+			ULEAK_ASSERT(!"Corrupted free block");
 		}
 	}
 }
-
-void sblock_free_check_all ()
-{
-	if (!check_free_repetition) return;
-
-	for (uint8_t *bptr = sheap; bptr < sheap + heap_size; ) {
-		struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
-		assert (block->asize % 16 == 0);
-
-		if ((block->flags & BF_USED) == 0) {
-			sblock_free_check (block);
-		}
-
-		bptr += sizeof(struct block_control) + block->asize;
-		assert (bptr <= sheap + heap_size);
-	}
-}
-
-// -----------------------------------------------------------------------------
-// Инициализация.
-
-// -----------------------------------------------------------------------------
-// Переодические операции (статистика по памяти по любому плюс опциональные вещи)
-
-void speriodic()
-{
-	// Счетчик выделений. Для отображения статистики памяти.
-	static uint32_t scounter = 0;
-
-	scounter++;
-	if (scounter % operation_period != 0)
-		return;
-
-	// Статистика использования памяти.
-	printf ("\t*** Heap used: %u, max: %u\n", memory_used, memory_max_used);
-
-	sblock_tail_check_all();
-	sblock_free_check_all();
-}
-
-// -----------------------------------------------------------------------------
-// Очень простая реализация менеджера памяти
 
 namespace heapmgr {
 
@@ -372,17 +342,20 @@ void init()
 
 uint32_t getcacheindex(struct block_control *block)
 {
-	return reinterpret_cast<uint8_t *>(block) - sheap;
+	return (reinterpret_cast<uint8_t *>(block) - sheap) | 0x80000000;
 }
 
 struct block_control *getcacheblock(uint32_t idx)
 {
-	assert (idx < heap_size);
-	return reinterpret_cast<struct block_control *>(sheap + idx);
+	ULEAK_ASSERT ((idx & 0x80000000) != 0);
+	const uint32_t iidx = idx & 0x7fffffff;
+	ULEAK_ASSERT (iidx < heap_size);
+	return reinterpret_cast<struct block_control *>(sheap + iidx);
 }
 
 void storeblock (struct block_control *block)
 {
+	ULEAK_ASSERT ((block->flags & BF_USED) == 0);
 	int cidx = (block->asize - tail_zone - 1) / 16;
 	if (cidx > 15) cidx = 16;
 
@@ -403,6 +376,7 @@ struct block_control *findblock(size_t asize)
 		uint32_t *idxptr = &(bcache[cidx]);
 		while (*idxptr != cache_empty) {
 			struct block_control *block = getcacheblock(*idxptr);
+ 			sblock_free_check (block);
 
 			if (block->asize >= asize) {
 				// отлинковать
@@ -421,7 +395,7 @@ struct block_control *findblock(size_t asize)
 // 	// Здесь пока последовательный поиск, буду переделывать на индексированный
 // 	struct block_control *block = begin_block;
 // 	while (block < end_block) {
-// 		assert (block->asize % 16 == 0);
+// 		ULEAK_ASSERT (block->asize % 16 == 0);
 //
 // 		if ((block->flags & BF_USED) == 0 && block->asize >= asize) {
 // 			sblock_free_check (block);
@@ -431,7 +405,7 @@ struct block_control *findblock(size_t asize)
 // 		block = nextblock(block);
 // 	}
 //
-// 	assert (block == end_block);
+// 	ULEAK_ASSERT (block == end_block);
 // 	return 0;
 }
 
@@ -442,7 +416,7 @@ void init()
 	cache::init();
 
 	begin_block->asize = heap_size - sizeof(struct block_control);
-	assert (begin_block->asize % 16 == 0);
+	ULEAK_ASSERT (begin_block->asize % 16 == 0);
 
 	begin_block->flags = 0;
 	begin_block->cp_idx = -1;
@@ -451,9 +425,28 @@ void init()
 	cache::storeblock(begin_block);
 }
 
+void check_all_free ()
+{
+	if (!check_free_repetition) return;
+
+	struct block_control *block = begin_block;
+	while (block < end_block) {
+		ULEAK_ASSERT (block->asize % 16 == 0);
+
+		if ((block->flags & BF_USED) == 0) {
+			sblock_free_check (block);
+		}
+
+		block = nextblock(block);
+	}
+
+	ULEAK_ASSERT (block == end_block);
+}
+
+
 void *alloc (size_t size, callpoint_t cp, uint32_t aclass)
 {
-	assert (aclass < 3);
+	ULEAK_ASSERT (aclass < 3);
 
 	if (size == 0) {
 		char name[80];
@@ -475,12 +468,13 @@ void *alloc (size_t size, callpoint_t cp, uint32_t aclass)
 		block = nextblock(nblock);
 		block->asize = asize;
 
+		sblock_free_init(nblock);
 		cache::storeblock(nblock);
 	}
 
-	block->flags |= BF_USED;
+	block->flags = BF_USED;
 
-	assert (size <= block->asize);
+	ULEAK_ASSERT (size <= block->asize);
 	block->size = size;
 	block->aclass = aclass;
 
@@ -516,7 +510,7 @@ void free (void *ptr, callpoint_t cp, uint32_t aclass)
 	if ((block->flags & BF_USED) == 0) {
 		struct block_control *fblock = begin_block;
 		while (fblock < end_block) {
-			assert (fblock->asize % 16 == 0);
+			ULEAK_ASSERT (fblock->asize % 16 == 0);
 
 			if (fblock == block) {
 				// Блок уже освобожден.
@@ -528,7 +522,7 @@ void free (void *ptr, callpoint_t cp, uint32_t aclass)
 
 			fblock = nextblock(fblock);
 		}
-		assert (fblock == end_block);
+		ULEAK_ASSERT (fblock == end_block);
 
 		// Кривой указатель или блок освобожден уже слишком давно.
 		char name[80];
@@ -538,8 +532,8 @@ void free (void *ptr, callpoint_t cp, uint32_t aclass)
 	}
 
 	if (block->aclass != aclass) {
-		assert (block->aclass < 3);
-		assert (aclass < 3);
+		ULEAK_ASSERT (block->aclass < 3);
+		ULEAK_ASSERT (aclass < 3);
 
 		const char *allocf[] = {"*alloc", "new", "new[]"};
 		const char *freef[] = {"free", "delete", "delete[]"};
@@ -549,7 +543,7 @@ void free (void *ptr, callpoint_t cp, uint32_t aclass)
 		printf ("\t*** block allocated over '%s' from %s, free over '%s' from %s\n",
 			allocf[block->aclass], getCallPonitName(cpmgr::getCallPoint(block->cp_idx), aname, 80),
 			freef[aclass], getCallPonitName(cp, fname, 80));
-		assert(!"Mismatch function class");
+		ULEAK_ASSERT(!"Mismatch function class");
 	}
 
 	cpmgr::scallpointfree(block, cp);
@@ -559,7 +553,7 @@ void free (void *ptr, callpoint_t cp, uint32_t aclass)
 	sblock_free_init(block);
 	cache::storeblock(block);
 
-	assert (memory_used >= block->size);
+	ULEAK_ASSERT (memory_used >= block->size);
 	// статистика.
 	memory_used -= block->size;
 }
@@ -572,22 +566,20 @@ void defrag ()
 
 	struct block_control *block = begin_block;
 	while (block < end_block) {
-		assert (block->asize % 16 == 0);
+		ULEAK_ASSERT (block->asize % 16 == 0);
 
 		if ((block->flags & BF_USED) == 0) {
 			sblock_free_check(block);
 
 			while (true) {
 				struct block_control *nblock = nextblock(block);
-				assert (nblock <= end_block);
+				ULEAK_ASSERT (nblock <= end_block);
 				if (nblock == end_block) break;
 
-				assert (nblock->asize % 16 == 0);
-
+				ULEAK_ASSERT (nblock->asize % 16 == 0);
 				if ((nblock->flags & BF_USED) != 0) break;
 
 				sblock_free_check (nblock);
-
 				block->asize += sizeof(struct block_control) + nblock->asize;
 			}
 
@@ -599,7 +591,7 @@ void defrag ()
 
 		block = nextblock(block);
 	}
-	assert (block == end_block);
+	ULEAK_ASSERT (block == end_block);
 
 	printf ("\t*** defrag. max free block - %u\n", maxfree);
 }
@@ -607,8 +599,8 @@ void defrag ()
 uint32_t blocksize (void *ptr)
 {
 	struct block_control *block = getBlockByPtr(ptr);
-	assert (block != 0);
-	assert ((block->flags & BF_USED) != 0);	// Блок должен быть занят, только тогда size актуален.
+	ULEAK_ASSERT (block != 0);
+	ULEAK_ASSERT ((block->flags & BF_USED) != 0);	// Блок должен быть занят, только тогда size актуален.
 	return block->size;
 }
 
@@ -654,12 +646,28 @@ void init()
 	active = true;
 }
 
+void periodic()
+{
+	// Счетчик выделений. Для отображения статистики памяти.
+	static uint32_t scounter = 0;
+
+	scounter++;
+	if (scounter % operation_period != 0)
+		return;
+
+	// Статистика использования памяти.
+	printf ("\t*** Heap used: %u, max: %u\n", memory_used, memory_max_used);
+
+	sblock_tail_check_all();
+	heapmgr::check_all_free();
+}
+
 void *alloc (size_t size, callpoint_t cp, uint32_t aclass)
 {
-	assert (size < heap_size);
+	ULEAK_ASSERT (size < heap_size);
 	if (!active) init();
 	lock_t lock;
-	speriodic();
+	periodic();
 
 	void *ptr = heapmgr::alloc(size, cp, aclass);
 	if (ptr == 0) {
@@ -671,25 +679,25 @@ void *alloc (size_t size, callpoint_t cp, uint32_t aclass)
 			char name[80];
 			printf("\t*** No memory for alloc(%u), called from %s\n",
 				uint32_t(size), getCallPonitName(cp, name, 80));
-			assert(!"No memory");
+			ULEAK_ASSERT(!"No memory");
 		}
 	}
 
-	assert ((unsigned long)ptr % 16 == 0);
+	ULEAK_ASSERT ((unsigned long)ptr % 16 == 0);
 	return ptr;
 }
 
 void free (void *ptr, callpoint_t cp, uint32_t aclass)
 {
-	assert(active);
+	ULEAK_ASSERT(active);
 	lock_t lock;
-	speriodic();
+	periodic();
 	heapmgr::free(ptr, cp, aclass);
 }
 
 uint32_t blocksize(void *ptr)
 {
-	assert(active);
+	ULEAK_ASSERT(active);
 	lock_t lock;
 
 	return heapmgr::blocksize(ptr);
