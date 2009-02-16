@@ -235,8 +235,7 @@ callpoint_t getCallPoint(int idx)
 
 void result()
 {
-	for (int i = 0; i < call_points; i++) {
-		if (cparray[i].cp == 0) break;
+	for (int i = 0; i < call_points && cparray[i].cp != 0; i++) {
 		if (cparray[i].current_blocks == 0) continue;
 
 		// NOTE: Эта функция вызывается значительно позже всего, видимо
@@ -244,6 +243,19 @@ void result()
 		printf ("\t*** memory leak %u blocks with size %u, allocated from %p.\n",
 			cparray[i].current_blocks, cparray[i].size, cparray[i].cp);
 	}
+}
+
+// Ее бы блочить конечно для порядку надо, она будет вызываться из getCallPoint.
+// но она не меняет соджержимого так что пойдет и так.
+bool AvailCallPoint(callpoint_t cp)
+{
+	for (int i = 0; i < call_points && cparray[i].cp != 0; i++) {
+		if (cparray[i].cp == cp) {
+			return (cparray[i].current_blocks < block_limit);
+		}
+	}
+
+	return true;
 }
 
 } // namespace cpmgr
@@ -737,13 +749,13 @@ uint32_t blocksize(void *ptr)
 	return heapmgr::blocksize(ptr);
 }
 
-uint32_t blockcount(callpoint_t cp)
+bool AvailCallPoint(callpoint_t cp)
 {
 	if (!active) init();
 	lock_t lock;
 
-	// TODO: определить количество блоков в этой точке вызова.
-	return 0;
+	// Делаем это только после инициализации. для этого и враппер
+	return cpmgr::AvailCallPoint(cp);
 }
 
 // Неблокируемая функция, но ей необходимо знать размер блока.
@@ -813,26 +825,13 @@ callpoint_t getCallPoint()
 
 	unw_word_t ip;
 	unw_get_reg(&cursor, UNW_REG_IP, &ip);
-	return reinterpret_cast<callpoint_t>(ip);
 
-// 	while (unw_step(&cursor) > 0) {
-// 		char sym[80];
-// 		unw_get_proc_name(&cursor, sym, 80, 0);
-//
-// 		// Что-то это далеко не полный список...
-// 		if (	strncmp(sym, "_ZNS", 4) == 0 ||		// std::
-// 			strncmp(sym, "_ZN5boost", 9) == 0)	// boost::
-// 		{
-// 			continue;
-// 		}
-//
-// 		// В случае переполнения счетчика точки -
-// 		// переходим на верхний уровень.
-// 		unw_word_t ip;
-// 		unw_get_reg(&cursor, UNW_REG_IP, &ip);
-// 		if (getBlockCount(ip) < block_limit)
-// 			return ip;
-// 	}
+	while (!heapif::AvailCallPoint(reinterpret_cast<callpoint_t>(ip))) {
+		if (unw_step(&cursor) == 0) break;
+		unw_get_reg(&cursor, UNW_REG_IP, &ip);
+	}
+
+	return reinterpret_cast<callpoint_t>(ip);
 #else
 	return reinterpret_cast<callpoint_t>(getReturnAddress(1));
 #endif
