@@ -66,7 +66,7 @@ const uint32_t heap_size = 256 * 1024 * 1024;
 const int call_points = 8192;
 
 // Допустимое количество блоков на точку. во избежание лишней ругани.
-const uint32_t block_limit = 100000;
+const uint32_t block_limit = 20000;
 
 // Типы операторов освобождения должны соответствовать операторам выделения.
 enum {
@@ -195,9 +195,14 @@ int scallpointalloc(const struct block_control *block, callpoint_t cp)
 			cparray[i].current_blocks++;
 			cparray[i].cp = cp;
 
+			// В связи со изменением стратегии обработки коллпоинтов
+			// .max_blocks вообще теряет смысл.
 			if (cparray[i].current_blocks > cparray[i].max_blocks) {
 				cparray[i].max_blocks = cparray[i].current_blocks;
+			}
 
+			// В связи с изменением стратегии обработки коллпоинтов - ругаться надо заранее.
+			if (cparray[i].current_blocks > block_limit * 9 / 10) {
 				char name[80];
 				printf ("\t*** leak %u from %s with %ssize %u\n",
 					cparray[i].max_blocks, getCallPonitName(cparray[i].cp, name, 80),
@@ -235,6 +240,9 @@ callpoint_t getCallPoint(int idx)
 
 void result()
 {
+	// А вот здесь засада... она вызывается несколько раз в разных нитях
+	// (может быть в разных модулях?)
+	printf ("\t*** exited statistic:\n");
 	for (int i = 0; i < call_points && cparray[i].cp != 0; i++) {
 		if (cparray[i].current_blocks == 0) continue;
 
