@@ -59,6 +59,9 @@ const bool check_tail_repetition = true;
 // Размер буферной зоны
 const uint32_t tail_zone = check_tail ? 32 : 0;
 
+// голова блока, пока просто выделим не проверяя содержимого.
+const uint32_t head_zone = 16;
+
 // размер хипа.
 const uint32_t heap_size = 256 * 1024 * 1024;
 
@@ -284,7 +287,7 @@ struct block_control *nextblock(struct block_control *block)
 
 struct block_control *getBlockByPtr(void *ptr)
 {
-	uint8_t *bptr = reinterpret_cast<uint8_t *>(ptr) - sizeof (struct block_control);
+	uint8_t *bptr = reinterpret_cast<uint8_t *>(ptr) - (sizeof (struct block_control) + head_zone);
 	struct block_control *block = reinterpret_cast<struct block_control *>(bptr);
 
 	if (block < begin_block || block >= end_block)
@@ -302,7 +305,7 @@ void blocktail_init (struct block_control *block)
 
 	if (!check_tail) return;
 
-	memset (block->ptr + block->size, AFILL, block->asize - block->size);
+	memset (block->ptr + head_zone + block->size, AFILL, block->asize - (head_zone + block->size));
 }
 
 void blocktail_check (const struct block_control *block)
@@ -311,15 +314,16 @@ void blocktail_check (const struct block_control *block)
 
 	if (!check_tail) return;
 
-	for (int i = block->asize - block->size - 1; i >= 0; i--) {
-		if (block->ptr[block->size + i] != AFILL) {
+	const size_t tail_offset = block->size + head_zone;
+
+	for (int i = block->asize - tail_offset - 1; i >= 0; i--) {
+		if (block->ptr[tail_offset + i] != AFILL) {
 			char name[80];
 			printf ("\t*** corrupted block tail, %u bytes, allocated from %s, size %u\n",
 				i, getCallPonitName(cpmgr::getCallPoint(block->cp_idx), name, 80), block->size);
 			BOOST_ASSERT(!"Corrupted block tail");
 		}
 	}
-
 }
 
 void blocktail_check_all ()
@@ -408,7 +412,9 @@ void init()
 void storeblock (struct block_control *block)
 {
 	BOOST_ASSERT ((block->flags & BF_USED) == 0);
-	int cidx = (block->asize - tail_zone - 1) / 16;
+	size_t bsize = block->asize - tail_zone - head_zone;
+
+	int cidx = (bsize - 1) / 16;
 	if (cidx > 15) cidx = 16;
 
 	if (pcache[cidx] != 0 && keep_free) {
@@ -427,7 +433,8 @@ void storeblock (struct block_control *block)
 struct block_control *findblock(size_t asize)
 {
 	// Поиск блока по кешу.
-	int cidx = (asize - tail_zone - 1) / 16;
+	size_t bsize = asize - tail_zone - head_zone;
+	int cidx = (bsize - 1) / 16;
 	if (cidx > 15) cidx = 16;
 
 	while (cidx < 17) {
@@ -496,12 +503,12 @@ void *alloc (size_t size, callpoint_t cp, uint32_t aclass)
 			getCallPonitName(cp, name, 80));
 	}
 
-	const uint32_t asize = (size + tail_zone + 15) & ~15;
+	const uint32_t asize = (size + head_zone + tail_zone + 15) & ~15;
 
 	struct block_control *block = cache::findblock(asize);
 	if (block == 0) return 0;
 
-	if (block->asize > asize + sizeof(struct block_control) + tail_zone) {
+	if (block->asize > asize + sizeof(struct block_control) + head_zone + tail_zone) {
 		// Отделяем для выделения блок с конца!
 		struct block_control *nblock = block;
 
@@ -528,7 +535,7 @@ void *alloc (size_t size, callpoint_t cp, uint32_t aclass)
 	memory_used += block->size;
 	memory_max_used = max(memory_max_used, memory_used);
 
-	return block->ptr;
+	return block->ptr + head_zone;
 }
 
 void free (void *ptr, callpoint_t cp, uint32_t aclass)
