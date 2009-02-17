@@ -57,10 +57,10 @@ const bool keep_free = false;
 const bool check_tail = true;
 const bool check_tail_repetition = true;
 // Размер буферной зоны
-const uint32_t tail_zone = check_tail ? 32 : 0;
+const uint32_t tail_zone = check_tail ? 16 : 0;
 
 // голова блока, пока просто выделим не проверяя содержимого.
-const uint32_t head_zone = 16;
+const uint32_t head_zone = check_tail ? 16 : 0;
 
 // размер хипа.
 const uint32_t heap_size = 256 * 1024 * 1024;
@@ -305,6 +305,9 @@ void blocktail_init (struct block_control *block)
 
 	if (!check_tail) return;
 
+	// голова
+	memset (block->ptr, AFILL, head_zone);
+	// хвост
 	memset (block->ptr + head_zone + block->size, AFILL, block->asize - (head_zone + block->size));
 }
 
@@ -316,6 +319,15 @@ void blocktail_check (const struct block_control *block)
 
 	const size_t tail_offset = block->size + head_zone;
 
+	for (int i = head_zone - 1; i >= 0; i--) {
+		if (block->ptr[i] != AFILL) {
+			char name[80];
+			printf ("\t*** corrupted block head, %u bytes, allocated from %s, size %u\n",
+				i, getCallPonitName(cpmgr::getCallPoint(block->cp_idx), name, 80), block->size);
+			BOOST_ASSERT(!"Corrupted block head");
+		}
+	}
+
 	for (int i = block->asize - tail_offset - 1; i >= 0; i--) {
 		if (block->ptr[tail_offset + i] != AFILL) {
 			char name[80];
@@ -324,24 +336,6 @@ void blocktail_check (const struct block_control *block)
 			BOOST_ASSERT(!"Corrupted block tail");
 		}
 	}
-}
-
-void blocktail_check_all ()
-{
-	if (!check_tail_repetition) return;
-
-	struct block_control *block = begin_block;
-	while (block < end_block) {
-		BOOST_ASSERT (block->asize % 16 == 0);
-
-		if ((block->flags & BF_USED) != 0) {
-			blocktail_check (block);
-		}
-
-		block = nextblock(block);
-	}
-
-	BOOST_ASSERT (block == end_block);
 }
 
 // -----------------------------------------------------------------------------
@@ -378,9 +372,9 @@ void freeblock_check (const struct block_control *block)
 	}
 }
 
-void freeblock_check_all ()
+void block_check_all ()
 {
-	if (!check_free_repetition) return;
+	if (!check_free_repetition && !check_tail_repetition) return;
 
 	struct block_control *block = begin_block;
 	while (block < end_block) {
@@ -388,6 +382,8 @@ void freeblock_check_all ()
 
 		if ((block->flags & BF_USED) == 0) {
 			freeblock_check (block);
+		} else {
+			blocktail_check (block);
 		}
 
 		block = nextblock(block);
@@ -459,24 +455,7 @@ struct block_control *findblock(size_t asize)
 	}
 
 	return 0;
-
-// 	// Здесь пока последовательный поиск, буду переделывать на индексированный
-// 	struct block_control *block = begin_block;
-// 	while (block < end_block) {
-// 		BOOST_ASSERT (block->asize % 16 == 0);
-//
-// 		if ((block->flags & BF_USED) == 0 && block->asize >= asize) {
-// 			freeblock_check (block);
-// 			return block;
-// 		}
-//
-// 		block = nextblock(block);
-// 	}
-//
-// 	BOOST_ASSERT (block == end_block);
-// 	return 0;
 }
-
 } // namespace cache
 
 void init()
@@ -719,8 +698,7 @@ void periodic()
 	// Статистика использования памяти.
 	printf ("\t*** Heap used: %u, max: %u\n", memory_used, memory_max_used);
 
-	heapmgr::blocktail_check_all();
-	heapmgr::freeblock_check_all();
+	heapmgr::block_check_all();
 }
 
 void *alloc (size_t size, callpoint_t cp, uint32_t aclass)
