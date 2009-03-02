@@ -893,37 +893,6 @@ void *realloc (void *ptr, size_t size, callpoint_t cp, uint32_t aclass)
 // -----------------------------------------------------------------------------
 // Определение точек вызова
 
-#ifndef LIBUNWIND
-void *getReturnAddress (int level)
-{
-	switch (level) {
-		case 0: return __builtin_return_address(0);
-		case 1: return __builtin_return_address(1);
-		case 2: return __builtin_return_address(2);
-		case 3: return __builtin_return_address(3);
-		case 4: return __builtin_return_address(4);
-		case 5: return __builtin_return_address(5);
-		case 6: return __builtin_return_address(6);
-		case 7: return __builtin_return_address(7);
-		case 8: return __builtin_return_address(8);
-		case 9: return __builtin_return_address(9);
-		case 10: return __builtin_return_address(10);
-		case 11: return __builtin_return_address(11);
-		case 12: return __builtin_return_address(12);
-		case 13: return __builtin_return_address(13);
-		case 14: return __builtin_return_address(14);
-		case 15: return __builtin_return_address(15);
-		case 16: return __builtin_return_address(16);
-		case 17: return __builtin_return_address(17);
-		case 18: return __builtin_return_address(18);
-		case 19: return __builtin_return_address(19);
-		default: break;
-	}
-
-	return 0;
-}
-#endif
-
 callpoint_t getCallPoint()
 {
 #ifdef LIBUNWIND
@@ -948,7 +917,27 @@ callpoint_t getCallPoint()
 
 	return reinterpret_cast<callpoint_t>(ip);
 #else
-	return reinterpret_cast<callpoint_t>(getReturnAddress(1));
+	// Этот код может упасть, чтобы этого избежать надо увеличивать block_limit
+	callpoint_t cp = __builtin_return_address(1);
+	if (heapif::AvailCallPoint(cp)) return cp;
+	cp = __builtin_return_address(2);
+	if (heapif::AvailCallPoint(cp)) return cp;
+	cp = __builtin_return_address(3);
+	if (heapif::AvailCallPoint(cp)) return cp;
+	cp = __builtin_return_address(4);
+	if (heapif::AvailCallPoint(cp)) return cp;
+	cp = __builtin_return_address(5);
+	if (heapif::AvailCallPoint(cp)) return cp;
+	cp = __builtin_return_address(6);
+	if (heapif::AvailCallPoint(cp)) return cp;
+	cp = __builtin_return_address(7);
+	if (heapif::AvailCallPoint(cp)) return cp;
+	cp = __builtin_return_address(8);
+	if (heapif::AvailCallPoint(cp)) return cp;
+	cp = __builtin_return_address(9);
+	if (heapif::AvailCallPoint(cp)) return cp;
+	cp = __builtin_return_address(10);
+	return cp;
 #endif
 }
 
