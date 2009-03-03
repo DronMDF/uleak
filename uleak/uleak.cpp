@@ -99,14 +99,17 @@ namespace {
 
 // Частота вызова переодических операций.
 // Меряется количествами вызовов функций alloc/free
-const uint32_t operation_period = 10000;
+const uint32_t operation_period = 1000;
 
 // Ругаться на free(0)
 const bool free_zero = false;
 
+// Ругаться на alloc(0)
+const bool alloc_zero = false;
+
 // Заполнение освобождаемых блоков и контроль использования после освобождения (может производиться с большо-о-ой задержкой)
 const bool check_free = true;
-const uint32_t check_free_limit = 256;	// Максимально проверяемый размер блока
+const uint32_t check_free_limit = 4096;	// Максимально проверяемый размер блока
 const bool check_free_repetition = true;
 
 // Хранить свободные блоки по возможности дольше. (замедляет работу в ~60 раз)
@@ -122,17 +125,17 @@ const uint32_t tail_zone = check_tail ? 16 : 0;
 const uint32_t head_zone = check_tail ? 16 : 0;
 
 // размер хипа.
-const uint32_t heap_size = 256 * 1024 * 1024;
+const uint32_t heap_size = 32 * 1024 * 1024;
 
 // количество точек вызова. Их должно хватать. если не хватает будет BOOST_ASSERT.
 const int call_points = 8192;
 
 // Допустимое количество блоков на точку. во избежание лишней ругани.
-const uint32_t block_limit = 20000;
+const uint32_t block_limit = 1000;
 
 // Поиск мемориликов по таймаутам.
 const bool block_timeout = true;
-const time_t block_timeout_value = 5 * 60;	// пока поставим 5 минут.
+const time_t block_timeout_value = 60 * 60;	// пока поставим 5 минут.
 
 // Типы операторов освобождения должны соответствовать операторам выделения.
 enum {
@@ -590,7 +593,7 @@ void *alloc (size_t size, callpoint_t cp, uint32_t aclass)
 {
 	BOOST_ASSERT (aclass < 3);
 
-	if (size == 0) {
+	if (alloc_zero && size == 0) {
 		char name[80];
 		printf ("\t*** zero size alloc from %s\n",
 			getCallPonitName(cp, name, 80));
