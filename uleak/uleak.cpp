@@ -766,6 +766,24 @@ private:
 
 	static volatile lock_state m_lock;
 
+#if __GNUC__ < 4
+	// Эти буилтинсы появились только в gcc-4
+	lock_state __sync_lock_test_and_set(volatile lock_state *m_lock, lock_state state) const
+	{
+		lock_state rv;
+                asm volatile("lock cmpxchgl %1, %2"
+                             : "=a"(rv)
+                             : "r"(state), "m"(*m_lock), "a"(UNLOCKED)
+                             : "memory");
+		return rv;
+	}
+
+	static void __sync_lock_release(volatile lock_state *m_lock, lock_state state)
+	{
+		*m_lock = state;
+	}
+#endif
+
 public:
 	lock_t() {
 		while (__sync_lock_test_and_set(&m_lock, LOCKED) == LOCKED) { };
