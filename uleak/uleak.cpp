@@ -283,7 +283,7 @@ int scallpointalloc(const struct block_control *block, callpoint_t cp)
 			if (cparray[i].current_blocks > block_limit * 9 / 10) {
 				char name[80];
 				printf ("\t*** leak %u from %s with %ssize %u\n",
-					cparray[i].max_blocks, getCallPonitName(cparray[i].cp, name, 80),
+					cparray[i].current_blocks, getCallPonitName(cparray[i].cp, name, 80),
 					cparray[i].size == block->size ? "" : "variable ", block->size);
 			}
 
